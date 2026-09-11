@@ -63,7 +63,7 @@ const hostToolHits = count(hostBody, 'harness.registerTool(ctx, harness.defineTo
 hostBody = hostBody.replaceAll('harness.registerTool(ctx, harness.defineTool(', 'ctx.tools.register(defineTool(')
 const hostHandleHits = count(hostBody, 'harness.handle(')
 hostBody = hostBody.replaceAll('harness.handle(', 'handle(')
-if (hostToolHits !== 6) throw new Error('host: expected 6 tool registrations, saw ' + hostToolHits)
+if (hostToolHits !== 14) throw new Error('host: expected 14 tool registrations, saw ' + hostToolHits)
 // state / saveText / addSelection / removeSelection / clearSelections / commit / asset / reload
 if (hostHandleHits !== 8) throw new Error('host: expected 8 rpc handlers, saw ' + hostHandleHits)
 if (hostBody.includes('harness.')) throw new Error('host: a harness.* reference survived')
