@@ -14,3 +14,7 @@
       # `name`. Quoted because `@` is a reserved indicator in YAML and cannot
       # open a plain scalar.
       name: 'dsh-window'
+      config:
+        # 笔记目录与文件名，相对会话工作区。默认即历史上的 dsh-note/note.md。
+        noteDir: dsh-note
+        noteFile: note.md

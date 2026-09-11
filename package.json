@@ -1,6 +1,6 @@
 {
   "name": "dsh-window",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Typora-like floating Markdown note window for the DeepSeek Harness web GUI: dock/drag/collapse, long-press text selection with persisted highlights, git-managed note, Mermaid rendering, and note_* model tools.",
   "type": "module",
   "main": "lib/index.js",

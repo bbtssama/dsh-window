@@ -1,5 +1,5 @@
-const NOTE_DIR = 'dsh-note'
-const NOTE_FILE = 'note.md'
+let NOTE_DIR = 'dsh-note'
+let NOTE_FILE = 'note.md'
 const STATE_FILE = '.note-state.json'
 const BAD_STATE_FILE = '.note-state.bad.json'
 const STATE_VERSION = 1
