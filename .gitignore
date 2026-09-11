@@ -1,0 +1,10 @@
+# Installed dependencies — consumers get mermaid from npm, never from the repo.
+node_modules/
+
+# Local scratch
+*.log
+.DS_Store
+Thumbs.db
+
+# Generated at build time from src/dynamic-*.js.
+# lib/ IS committed on purpose so the package works from a git install too.

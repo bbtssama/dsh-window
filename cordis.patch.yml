@@ -1,0 +1,16 @@
+# dsh-window bundle patch: mounts the note-card plugin into the host
+# composition of a dsh profile. The plugin registers the `note_*` tools into
+# the shared `tools` registry, one usage section into the global system prompt,
+# and one HTTP route (`/plugins/dsh-window/rpc`) that the browser-side note
+# card calls for note text, selection objects, assets, and git commits.
+#
+# Install: `dsh plugin --profile <name> add <this package>` (npm or a local
+# path), then make sure the installed copy is a real directory rather than a
+# symlink — Node resolves the realpath, and a link outside the profile's
+# node_modules cannot resolve `@deepseek-ai/dsh-tools`.
+- insert:
+    - id: note-card
+      # Node-resolvable package name — must stay in sync with package.json
+      # `name`. Quoted because `@` is a reserved indicator in YAML and cannot
+      # open a plain scalar.
+      name: 'dsh-window'
