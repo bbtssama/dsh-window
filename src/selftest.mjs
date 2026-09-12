@@ -73,12 +73,12 @@ ok('subscribes to internal/service for late wiring', serviceListeners.some((l) =
 webServerUp = true
 systemPromptUp = true
 for (const listener of serviceListeners) listener.fn('webServer')
-ok('routes register once webServer appears', registeredRoutes.length === 2, String(registeredRoutes.length))
+ok('routes register once webServer appears', registeredRoutes.length === 3, String(registeredRoutes.length))
 ok('prompt section registers once systemPrompt appears', registeredSections.length === 1, String(registeredSections.length))
 ok('prompt section carries usage text', registeredSections[0] && typeof registeredSections[0].text === 'string' && registeredSections[0].text.includes('note_take_new_selections'), registeredSections[0] ? registeredSections[0].text.length + ' chars' : 'n/a')
 // idempotent: a second appearance must not double-register
 for (const listener of serviceListeners) listener.fn('webServer')
-ok('re-firing the service event does not double-register', registeredRoutes.length === 2 && registeredSections.length === 1, registeredRoutes.length + '/' + registeredSections.length)
+ok('re-firing the service event does not double-register', registeredRoutes.length === 3 && registeredSections.length === 1, registeredRoutes.length + '/' + registeredSections.length)
 
 const toolNames = registeredTools.map((tool) => tool.name).sort()
 const expectedTools = ['note_commit', 'note_get_selections', 'note_read', 'note_take_new_selections', 'note_write']
@@ -86,7 +86,7 @@ ok('registers the note_* tools', expectedTools.every((name) => toolNames.include
 console.log('  tools : ' + toolNames.join(', '))
 ok('every tool has a JSON Schema + render', registeredTools.every((tool) => tool.parameters && tool.output && tool.output.schema && typeof tool.output.render === 'function'))
 
-ok('registers the rpc and mermaid vendor routes', registeredRoutes.length === 2, registeredRoutes.map((r) => r.path).join(' '))
+ok('registers the rpc + vendor file + vendor prefix routes', registeredRoutes.length === 3, registeredRoutes.map((r) => r.path).join(' '))
 const route = registeredRoutes[0]
 ok('route path is /plugins/dsh-window/rpc', route && route.path === '/plugins/dsh-window/rpc', route && route.path)
 ok('route is an exact match', route && route.kind === 'exact', route && route.kind)

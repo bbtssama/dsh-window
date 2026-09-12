@@ -27,7 +27,10 @@ const profileDir = process.argv[2] || 'D:\\DSH\\profiles\\web'
 const dest = path.join(profileDir, 'node_modules', 'dsh-window')
 
 const PACKAGE = 'dsh-window'
-const COPY = ['package.json', 'cordis.patch.yml', 'lib']
+// node_modules/mermaid MUST be copied: the destructive rmSync above would
+// otherwise delete the vendor asset on every reinstall, and the host route that
+// serves Mermaid would 404 -> diagrams silently fail to render everywhere.
+const COPY = ['package.json', 'cordis.patch.yml', 'lib', 'node_modules/mermaid']
 
 // ── 1. publish the files as a real directory ────────────────────────────────
 fs.rmSync(dest, { recursive: true, force: true })

@@ -448,7 +448,10 @@ return {
       const parts = []
       for (let i = 0; i < list.length; i++) {
         const s = list[i]
-        const head = '#' + s.order + ' [' + s.id + '] 第' + s.startLine + '行:' + s.startCol + ' → 第' + s.endLine + '行:' + s.endCol + (s.fetched ? ' （已取用）' : ' （新选中）') + (s.stale ? ' [!]原文已变动' : '')
+        // The colour is part of the message the agent receives: it is the intent
+        // channel (yellow focus / pink question / green done / black masked), so it
+        // has to appear in the text render, not only in the stored object.
+        const head = '#' + s.order + ' [' + s.id + '] ' + ({ yellow: '黄', pink: '粉', green: '绿', black: '黑' }[s.color] || '黄') + ' 第' + s.startLine + '行:' + s.startCol + ' → 第' + s.endLine + '行:' + s.endCol + (s.fetched ? ' （已取用）' : ' （新选中）') + (s.stale ? ' [!]原文已变动' : '')
         parts.push(head + '\n' + s.text.split('\n').map(function (l) { return '    ' + l }).join('\n'))
       }
       return parts.join('\n\n')

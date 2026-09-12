@@ -17,6 +17,19 @@ const CSS = [
 // wins for an in-progress selection too (what you drag is what you get).
 // Other colours stay behind the text at z-index -1.
 '.dn-hlo[data-color=black]{background:#000;z-index:2;}',
+'.dn-blk-editor{width:100%;box-sizing:border-box;border:1px dashed rgba(0,0,0,.3);border-radius:8px;padding:8px 10px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.6;background:rgba(255,214,0,.08);color:inherit;outline:none;resize:vertical;overflow:auto;}',
+'.dn-blk-editor:focus{border-color:var(--dsw-alias-label-primary,#1b1b1b);}',
+// Handle: 44x44 invisible hit area, visual drawn inside as dot + stem (tip on the
+// caret). Overrides the old 12px circle rule regardless of source order.
+'.dn-root .dn-body .dn-handle{position:absolute;width:44px;height:44px;margin:0;padding:0;background:none;border:0;border-radius:0;box-shadow:none;transform:none;cursor:grab;}',
+'.dn-root .dn-body .dn-handle-dot{position:absolute;left:50%;width:15px;height:15px;margin-left:-7.5px;border-radius:50%;background:var(--dsw-alias-label-primary,#1b1b1b);box-shadow:0 1px 4px rgba(0,0,0,.35);}',
+'.dn-root .dn-body .dn-handle-tail{position:absolute;left:50%;width:2px;height:13px;margin-left:-1px;background:var(--dsw-alias-label-primary,#1b1b1b);}',
+'.dn-root .dn-body .dn-handle[data-tip=down] .dn-handle-dot{top:5px;}',
+'.dn-root .dn-body .dn-handle[data-tip=down] .dn-handle-tail{top:18px;}',
+'.dn-root .dn-body .dn-handle[data-tip=up] .dn-handle-dot{bottom:5px;}',
+'.dn-root .dn-body .dn-handle[data-tip=up] .dn-handle-tail{bottom:18px;}',
+'.dn-root .dn-body .dn-loupe{position:absolute;padding:5px 10px;border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid rgba(0,0,0,.2);box-shadow:0 6px 20px rgba(0,0,0,.3);z-index:9;pointer-events:none;font-size:16px;line-height:1.45;white-space:nowrap;overflow:hidden;text-align:center;color:inherit;}',
+'.dn-root .dn-body .dn-loupe-caret{display:inline-block;width:2px;height:1.1em;vertical-align:-.18em;background:#e5484d;margin:0 0.5px;}',
 '.dn-pen{display:inline-flex;align-items:center;position:relative;}',
 '.dn-pen-sw{width:18px;height:18px;border-radius:4px;border:1px solid rgba(0,0,0,.28);cursor:pointer;padding:0;margin:0 1px;}',
 '.dn-pen-sw[data-c=yellow]{background:rgba(255,214,0,.95);}',
@@ -138,7 +151,10 @@ const PEN_KEY = 'dsh-window:pen'
 const PEN_COLORS = ['yellow', 'pink', 'green', 'black']
 function readPenColor() { try { const v = window.localStorage.getItem(PEN_KEY); return PEN_COLORS.indexOf(v) >= 0 ? v : 'yellow' } catch (err) { return 'yellow' } }
 function writePenColor(c) { try { window.localStorage.setItem(PEN_KEY, c) } catch (err) { } }
-const COMPACT_W = 640, DOCK_TOP = 78, DOCK_RIGHT = 18, DOCK_BOTTOM = 18
+const COMPACT_W = 640, DOCK_TOP = 34, DOCK_RIGHT = 18, DOCK_BOTTOM = 18
+// Compact (phone) layout has its own offsets: it never used the dock constants,
+// it just sat at the overlay slot's natural position, so it could not be tuned.
+const COMPACT_TOP = 12, COMPACT_INSET = 8
 const FLOAT_MARGIN = 10, CONV_GAP = 14, MIN_W = 320, MAX_W = 1000, MIN_CHAT = 380, THROTTLE_MS = 16
 const SIZES = [{ id: 'std', w: 430, label: '标准' }, { id: 'wide', w: 620, label: '宽版' }, { id: 'xl', w: 900, label: '超宽' }]
 const DEFAULT_LAYOUT = { mode: 'docked', x: null, y: null, w: 430, h: null, size: 'std' }
@@ -150,6 +166,21 @@ const assetCache = {}
 // load simply leaves the hand-rolled renderer in place.
 let mermaidPromise = null
 function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return Math.abs(h) }
+const VENDOR_ESM = '/plugins/dsh-window/vendor/mermaid/mermaid.esm.min.mjs'
+function loadMermaidRuntime() {
+  if (mermaidRuntime !== null) return mermaidRuntime
+  mermaidRuntime = import(VENDOR_ESM).then(function (mod) {
+    const mm = mod && (mod.default || mod)
+    if (mm && typeof mm.render === 'function') return mm
+    throw new Error('分包未导出 render')
+  }).catch(function (esmErr) {
+    return loadMermaid().catch(function (scriptErr) {
+      throw new Error('分包失败: ' + String((esmErr && esmErr.message) || esmErr) + ' / 单文件回退失败: ' + String((scriptErr && scriptErr.message) || scriptErr))
+    })
+  })
+  return mermaidRuntime
+}
+let mermaidRuntime = null
 function loadMermaid() {
   if (mermaidPromise !== null) return mermaidPromise
   mermaidPromise = new Promise(function (resolve, reject) {
@@ -295,7 +326,7 @@ function readLayout() { try { return parseLayout(window.localStorage.getItem(LAY
 function writeLayout(o) { try { window.localStorage.setItem(LAYOUT_KEY, JSON.stringify(o)) } catch (err) { } }
 function resolveGeo(layout, vw, vh) {
   const compact = vw <= COMPACT_W
-  if (compact) return { compact: true, mode: 'compact', width: vw, shift: 0, style: null, dockable: false }
+  if (compact) return { compact: true, mode: 'compact', width: vw, shift: 0, dockable: false, style: { left: COMPACT_INSET + 'px', right: COMPACT_INSET + 'px', top: COMPACT_TOP + 'px', bottom: COMPACT_INSET + 'px' } }
   const maxW = Math.max(1, Math.min(MAX_W, vw - FLOAT_MARGIN * 2))
   const width = clamp(layout.w, Math.min(MIN_W, maxW), maxW)
   const shift = width + CONV_GAP + DOCK_RIGHT
@@ -478,16 +509,23 @@ return {
       // state/gantt/pie/ER on top of graph/flowchart. The hand-rolled renderer
       // below stays as the fallback for a missing runtime or a failed diagram.
       const [mmdSvg, setMmdSvg] = React.useState('')
+      const [mmdErr, setMmdErr] = React.useState('')
       const mmdSource = props.body.join('\n')
       React.useEffect(function () {
         let alive = true
         if (mmdSource.trim() === '') return undefined
-        loadMermaid().then(function (mm) {
+        loadMermaidRuntime().then(function (mm) {
           mm.initialize({ startOnLoad: false, securityLevel: 'strict', htmlLabels: false, theme: 'default', fontFamily: 'inherit' })
           return mm.render('dnm-' + props.line + '-' + hashStr(mmdSource), mmdSource)
         }).then(function (out) {
           if (alive && out && typeof out.svg === 'string') setMmdSvg(out.svg)
-        }).catch(function () { if (alive) setMmdSvg('') })
+        }).catch(function (err) {
+          // Surface the reason. Silently falling back to the built-in renderer is
+          // exactly why the mobile failure looked like "原因不明".
+          const msg = String((err && err.message) || err)
+          try { console.warn('dsh-window: mermaid render failed: ' + msg) } catch (e) { }
+          if (alive) { setMmdErr(msg.slice(0, 200)); setMmdSvg('') }
+        })
         return function () { alive = false }
       }, [mmdSource, props.line])
       const hlCls = props.hl ? (props.live ? ' dn-blk-hl-live' : ' dn-blk-hl') : ''
@@ -498,7 +536,7 @@ return {
       }
       if (!parsed.ok) {
         return h('div', { className: 'dn-mmd' + hlCls, 'data-line': props.line, ref: props.innerRef }, [
-          h('div', { className: 'dn-mmd-tag', key: 't' }, 'mermaid · 显示源码'),
+          h('div', { className: 'dn-mmd-tag', key: 't' }, 'mermaid · 显示源码' + (mmdErr ? ' — 渲染失败: ' + mmdErr : '')),
           h('div', { className: 'dn-mmd-src', key: 's' }, props.body.join('\n')),
         ])
       }
@@ -520,7 +558,7 @@ return {
         }
       }
       return h('div', { className: 'dn-mmd' + hlCls, 'data-line': props.line, ref: props.innerRef }, [
-        h('div', { className: 'dn-mmd-tag', key: 't' }, 'mermaid · ' + parsed.dir + ' · ' + Object.keys(nodes).length + ' 节点 · ' + parsed.edges.length + ' 边'),
+        h('div', { className: 'dn-mmd-tag', key: 't' }, 'mermaid · ' + parsed.dir + ' · ' + Object.keys(nodes).length + ' 节点 · ' + parsed.edges.length + ' 边' + (mmdErr ? ' — 渲染失败: ' + mmdErr : '')),
         h('div', { className: isLR ? 'dn-mmd-h' : 'dn-mmd-v', key: 'g' }, layerEls),
       ])
     }
@@ -536,6 +574,17 @@ return {
       // mouse release, or after the caret has been still for 1.5s on touch.
       const [barReady, setBarReady] = React.useState(false)
       const [penColor, setPenColor] = React.useState(readPenColor)
+      // In-place block editing: double clicking a block opens just that block's
+      // markdown, with everything else left rendered (Typora style).
+      const [editBlock, setEditBlock] = React.useState(null)
+      // Loupe shown while a selection handle is being dragged (iOS-style precise
+      // positioning); null when no drag is in flight.
+      const [magnify, setMagnify] = React.useState(null)
+      const editBlockRef = React.useRef(null)
+      const blockEditorRef = React.useRef(null)
+      // Render cache for the note body (see the call site): the same element
+      // objects let React skip those subtrees on a live-selection update.
+      const blocksCache = React.useRef({ key: '', kids: [] })
       const [penOpen, setPenOpen] = React.useState(false)
       const barTimerRef = React.useRef(null)
       const modRef = React.useRef('mouse')
@@ -599,6 +648,22 @@ return {
         win.addEventListener('resize', apply)
         return function () { win.removeEventListener('resize', apply) }
       }, [])
+      // A table (also code blocks and diagrams) scrolls horizontally INSIDE its own
+      // wrapper. The geometry cache is keyed by the card's width/mode, so it stayed
+      // valid across such a scroll and the overlay kept the pre-scroll coordinates:
+      // the highlight did not follow the table and the handles pointed at the wrong
+      // column. Re-measuring on every wrapper scroll fixes both, and the render
+      // cache means this costs only the overlay layer, not the 340 note blocks.
+      React.useEffect(function () {
+        const host = bodyRef.current
+        if (!host) return undefined
+        const nodes = host.querySelectorAll('[data-dn-table], .dn-pre, .dn-mmd')
+        const onScroll = function () { bump() }
+        for (let i = 0; i < nodes.length; i++) { try { nodes[i].addEventListener('scroll', onScroll, { passive: true }) } catch (err) { } }
+        return function () {
+          for (let i = 0; i < nodes.length; i++) { try { nodes[i].removeEventListener('scroll', onScroll) } catch (err) { } }
+        }
+      }, [st ? st.text : ''])
       React.useEffect(function () {
         if (firstLayoutRef.current) { firstLayoutRef.current = false; return }
         writeLayout(layout)
@@ -658,6 +723,45 @@ return {
         if (over > 0) bar.style.transform = 'translateX(-' + over + 'px)'
         return undefined
       }, [live, barReady, penOpen])
+      // Focus the block editor and drop the caret where the double click landed.
+      React.useEffect(function () {
+        if (editBlock === null) return undefined
+        const grab = function () {
+          const ta = blockEditorRef.current
+          const eb = editBlockRef.current
+          if (!ta || !eb) return
+          try {
+            ta.focus()
+            if (eb.caret) {
+              const off = offsetOfPos(eb.value, Math.max(1, eb.caret.line - eb.from + 1), eb.caret.col)
+              ta.setSelectionRange(off, off)
+            }
+          } catch (err) { }
+        }
+        // The shell grabs focus back right after a click, so focus is re-taken a
+        // few times; Escape / Ctrl+Enter are also bound at document level so they
+        // work even if focus ends up elsewhere.
+        const ids = [40, 180, 520].map(function (ms) { return window.setTimeout(grab, ms) })
+        const onKey = function (ev) {
+          if (ev.key === 'Escape') { ev.preventDefault(); cancelBlockEdit() }
+          else if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); commitBlockEdit() }
+        }
+        document.addEventListener('keydown', onKey, true)
+        const onDown = function (ev) {
+          const ta = blockEditorRef.current
+          if (!ta) return
+          const node = ev.target
+          if (node === ta || (node && ta.contains && ta.contains(node))) return
+          if (node && node.closest && node.closest('.dn-bar, .dn-handle')) return
+          commitBlockEdit()
+        }
+        document.addEventListener('pointerdown', onDown, true)
+        return function () {
+          for (let i = 0; i < ids.length; i++) { try { window.clearTimeout(ids[i]) } catch (err) { } }
+          try { document.removeEventListener('keydown', onKey, true) } catch (err) { }
+          try { document.removeEventListener('pointerdown', onDown, true) } catch (err) { }
+        }
+      }, [editBlock === null ? -1 : editBlock.from])
       function firstTextNode(el) { for (let i = 0; i < el.childNodes.length; i++) if (el.childNodes[i].nodeType === 3) return el.childNodes[i]; return null }
       function bodyOrigin() {
         const body = bodyRef.current
@@ -751,6 +855,11 @@ return {
           if (score < pickScore) { pickScore = score; pick = Number(keys[i]) }
         }
         if (pick === null) return null
+        // Dead space (gaps between blocks, the body's bottom padding) must not
+        // snap the caret onto whatever line happens to be nearest: a long press
+        // there used to select a word far away. Within a line height of the text
+        // the press still clamps to that line as before.
+        if (pickScore > 120) return null
         const cells = cellsOf(pick).cells
         if (!cells.length) return { line: pick, col: 0 }
         let lo = 0, hi = cells.length
@@ -1005,15 +1114,31 @@ return {
         const pt = pointToPos(p.x, p.y)
         if (!pt) return
         scheduleLive(pt)
+        setMagnify({ x: p.x, y: p.y, line: pt.line, col: pt.col })
+        // Dragging against a table's edge scrolls it, so the caret can reach columns
+        // that are currently out of view — the scrolling then re-measures geometry
+        // (see the scroll listener), so the highlight and handles stay in sync.
+        const lineEl = lineEls.current[pt.line]
+        const wrapEl = lineEl && lineEl.closest ? lineEl.closest('[data-dn-table]') : null
+        if (wrapEl && wrapEl.scrollWidth > wrapEl.clientWidth) {
+          const wr = wrapEl.getBoundingClientRect()
+          const EDGE = 30
+          if (p.x > wr.right - EDGE) {
+            wrapEl.scrollLeft = Math.min(wrapEl.scrollWidth - wrapEl.clientWidth, wrapEl.scrollLeft + Math.max(6, p.x - (wr.right - EDGE)))
+          } else if (p.x < wr.left + EDGE) {
+            wrapEl.scrollLeft = Math.max(0, wrapEl.scrollLeft - Math.max(6, (wr.left + EDGE) - p.x))
+          }
+        }
         hideBar()
-        if (modRef.current === 'touch') revealBar(1500)
+        if (modRef.current === 'touch') revealBar(500)
       }
       function onDragEnd() {
         if (lpTimer.current) { lpTimer.current(); lpTimer.current = null }
         if (throttleRef.current) { throttleRef.current(); throttleRef.current = 0 }
         if (pendingRef.current && drag.current) flushPending()
         drag.current = null; setPressing(false)
-        revealBar(modRef.current === 'touch' ? 1500 : 0)
+        setMagnify(null)
+        revealBar(modRef.current === 'touch' ? 500 : 0)
       }
       function bindPointer(el) {
         if (unbindRef.current) { const u = unbindRef.current; unbindRef.current = null; u() }
@@ -1043,7 +1168,21 @@ return {
         // inside a wide table stays selectable.
         const scroller = tgt && tgt.closest ? tgt.closest('.dn-twrap,.dn-pre,.dn-mmd') : null
         if (scroller && (tgt === scroller || e.clientY >= scroller.getBoundingClientRect().bottom - 12)) return
-        if (live) setLive(null)
+        // The body's own vertical scrollbar lives in the right gutter. Dragging it
+        // used to run the long-press timer and leave a large selection behind, so
+        // the gutter is excluded whenever a scrollbar is actually present.
+        const bodyHost = bodyRef.current
+        if (bodyHost) {
+          const gutter = bodyHost.offsetWidth - bodyHost.clientWidth
+          if (gutter > 0) {
+            const hr = bodyHost.getBoundingClientRect()
+            if (e.clientX >= hr.right - gutter - 2) return
+          }
+        }
+        // Deliberately does NOT clear an existing live highlight: on touch, a
+        // scroll drag begins with a pointerdown, and that used to throw the
+        // selection away. Only the bar's [取消] button (or committing it) clears
+        // it now, which makes desktop and mobile behave identically.
         modRef.current = e.pointerType === 'touch' ? 'touch' : 'mouse'
         hideBar()
         const pt = pointToPos(e.clientX, e.clientY)
@@ -1056,7 +1195,7 @@ return {
         lpTimer.current = ctx.timeout(function () {
           lpTimer.current = null
           const d = drag.current
-          if (!d || d.mode !== 'press') return
+          if (!d || !d.pt || d.mode !== 'press') return
           d.mode = 'drag'
           const w = wordRange(d.pt)
           const a = Math.min(w.from, w.to), f = Math.max(w.from, w.to)
@@ -1074,11 +1213,54 @@ return {
           bindPointer(el)
         }
       }
+      /** Source line range of the block containing \`line\`. */
+      function blockRangeAt(line) {
+        const blocks = parseBlocks(String(textRef.current || ''))
+        for (let i = 0; i < blocks.length; i++) {
+          const b = blocks[i]
+          let to = b.line
+          if (b.k === 'code' && b.endLine) to = b.endLine
+          if (b.k === 'table' && b.rows && b.rows.length) to = b.rows[b.rows.length - 1].line
+          if (line >= b.line && line <= to) return { from: b.line, to: to, kind: b.k }
+        }
+        return null
+      }
+      function cancelBlockEdit() { editBlockRef.current = null; setEditBlock(null) }
+      function commitBlockEdit() {
+        const eb = editBlockRef.current
+        editBlockRef.current = null
+        setEditBlock(null)
+        if (!eb || !st) return
+        const lines = String(st.text).split(String.fromCharCode(10))
+        const next = lines.slice(0, eb.from - 1).concat(String(eb.value).split(String.fromCharCode(10))).concat(lines.slice(eb.to))
+        const text = next.join(String.fromCharCode(10))
+        if (text === st.text) return
+        setBusy('保存中')
+        host.call('saveText', { text: text, baseRevision: revRef.current, sessionId: sidRef.current }).then(function (r) {
+          setBusy('')
+          if (r && r.ok) {
+            revRef.current = r.revision
+            textRef.current = text
+            setSt(function (prev) { return prev ? Object.assign({}, prev, { revision: r.revision, text: text, lineCount: text.split(String.fromCharCode(10)).length, selections: r.selections }) : prev })
+            setToast('已保存这一块')
+          } else {
+            setToast(r && r.conflict ? '笔记已被别处修改，请先重载' : '保存失败')
+          }
+        }).catch(function () { setBusy(''); setOffline(true) })
+      }
       function onDoubleClick(e) {
         if (mode !== 'read') return
         const tgt = e.target
         if (tgt && tgt.closest) { const a = tgt.closest('a'); if (a && a.getAttribute('href') && a.getAttribute('href') !== '#') return }
-        enterEdit(pointToPos(e.clientX, e.clientY))
+        const pt = pointToPos(e.clientX, e.clientY)
+        if (!pt) { enterEdit(null); return }
+        const range = blockRangeAt(pt.line)
+        if (!range) { enterEdit(pt); return }
+        // A table cell edits its own row, with the caret landing in that cell.
+        const lines = String(st.text).split(String.fromCharCode(10))
+        const eb = { from: range.from, to: range.to, kind: range.kind, value: lines.slice(range.from - 1, range.to).join(String.fromCharCode(10)), caret: pt, openedAt: Date.now() }
+        editBlockRef.current = eb
+        setEditBlock(eb)
       }
       function headDown(e) {
         if (geo.compact) return
@@ -1181,6 +1363,28 @@ return {
         for (let bi = 0; bi < blocks.length; bi++) {
           const b = blocks[bi]
           const key = 'b' + bi
+          if (editBlock && b.line === editBlock.from) {
+            out.push(h('textarea', {
+              className: 'dn-blk-editor', key: key, ref: blockEditorRef, value: editBlock.value,
+              rows: Math.min(30, Math.max(1, editBlock.value.split(String.fromCharCode(10)).length + 1)),
+              onChange: function (ev) {
+                const nb = Object.assign({}, editBlockRef.current, { value: ev.target.value })
+                editBlockRef.current = nb
+                setEditBlock(nb)
+              },
+              // No commit on blur: the DSH shell re-takes focus on its own
+              // schedule, so a blur is not a reliable "user finished" signal.
+              // Committing happens on an outside click or Ctrl/Cmd+Enter below.
+              onKeyDown: function (ev) {
+                if (ev.key === 'Escape') { ev.preventDefault(); cancelBlockEdit() }
+                if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); commitBlockEdit() }
+              },
+              onPointerDown: function (ev) { ev.stopPropagation() },
+              onDoubleClick: function (ev) { ev.stopPropagation() },
+              spellCheck: false,
+            }))
+            continue
+          }
           if (b.k === 'blank') { out.push(h('div', { className: 'dn-blank', 'data-line': b.line, key: key, ref: lineElsFor(b.line) })); continue }
           if (b.k === 'hr') { out.push(h('div', { className: 'dn-hr', 'data-line': b.line, key: key, ref: lineElsFor(b.line) })); continue }
           if (b.k === 'h') { out.push(h('div', { className: 'dn-h dn-h' + b.level, 'data-line': b.line, key: key, ref: lineElsFor(b.line) }, lineSpans(b.raw, b.base, false))); continue }
@@ -1196,13 +1400,9 @@ return {
           if (b.k === 'code') {
             const lang = (b.lang || '').toLowerCase()
             if (lang === 'mermaid') {
-              let hlKind = null
-              for (let i = 0; i < sels.length; i++) { const s = sels[i]; if (s.startLine <= b.endLine && s.endLine >= b.line) hlKind = 'saved' }
-              if (live) {
-                const lo = Math.min(live.a.line, live.f.line), hi = Math.max(live.a.line, live.f.line)
-                if (lo <= b.endLine && hi >= b.line) hlKind = 'live'
-              }
-              out.push(h(MermaidBlock, { key: key, line: b.line, body: b.body, text: st.text, hl: !!hlKind, live: hlKind === 'live', innerRef: lineElsFor(b.line) }))
+              // Highlighting for blocks is painted by the overlay layer (which is
+              // not memoized), so the memoized block itself must not carry it.
+              out.push(h(MermaidBlock, { key: key, line: b.line, body: b.body, text: st.text, hl: false, live: false, innerRef: lineElsFor(b.line) }))
               continue
             }
             const rows = []
@@ -1241,9 +1441,17 @@ return {
         }
         return out
       }
+      // Hand-rolled cache instead of useMemo: renderBlocks() has to run here and
+      // not earlier, because it closes over consts initialised above but used far
+      // below, and a hook added at this point would change the hook order between
+      // renders (which unmounts the whole card). Reusing the element objects makes
+      // React bail out of those subtrees, so a pointermove-driven live selection
+      // re-renders only the overlay/handle layer — the mobile-jank fix.
+      const blocksKey = (st ? st.text : '') + '|' + mode + '|' + (editBlock ? editBlock.from + ':' + editBlock.to : '')
+      if (blocksCache.current.key !== blocksKey) blocksCache.current = { key: blocksKey, kids: renderBlocks() }
       const bodyKids = mode === 'edit'
         ? [h('textarea', { className: 'dn-editor', key: 'ed', ref: editorRef, value: draft, onChange: onDraft, onPointerDown: function (e) { e.stopPropagation() }, onDoubleClick: function (e) { e.stopPropagation() }, spellCheck: false })]
-        : renderBlocks()
+        : blocksCache.current.kids.slice()
       if (mode === 'read') {
         const byLine = {}
         const lines = String(st.text).split('\n')
@@ -1266,9 +1474,34 @@ return {
         for (let i = 0; i < keys.length; i++) {
           const ln = Number(keys[i])
           const rects = highlightRects(ln, byLine[ln])
+          const lineElForClip = lineEls.current[ln]
+          const wrapForClip = lineElForClip && lineElForClip.closest ? lineElForClip.closest('[data-dn-table]') : null
+          let clipBox = null
+          if (wrapForClip && bodyRef.current) {
+            const wr = wrapForClip.getBoundingClientRect()
+            const hr = bodyRef.current.getBoundingClientRect()
+            const base = hr.left - bodyRef.current.scrollLeft
+            clipBox = { left: wr.left - base + 1, right: wr.right - base - 1 }
+          }
+          if (rects.length === 0) {
+            // Mermaid diagrams and images have no character boxes, so they get a
+            // single block-level tint over the whole element instead — a colour on
+            // a diagram then reads as a faint mask laid across the graphic.
+            const rec = cellsOf(ln)
+            if (rec.rect) {
+              const first = byLine[ln][0]
+              rects.push({ row: Math.round(rec.rect.top), kind: first.kind, color: first.color, left: rec.rect.left, right: rec.rect.right, top: rec.rect.top, bottom: rec.rect.bottom })
+            }
+          }
           for (let k = 0; k < rects.length; k++) {
             const r = rects[k]
-            bodyKids.push(h('div', { className: 'dn-hlo', 'data-kind': r.kind, 'data-color': r.color || 'yellow', key: 'o' + ln + '_' + k, style: { left: r.left + 'px', top: r.top + 'px', width: Math.max(1, r.right - r.left) + 'px', height: Math.max(2, r.bottom - r.top) + 'px' } }))
+            let lo = r.left, hi = r.right
+            if (clipBox) {
+              if (hi <= clipBox.left || lo >= clipBox.right) continue
+              lo = Math.max(lo, clipBox.left)
+              hi = Math.min(hi, clipBox.right)
+            }
+            bodyKids.push(h('div', { className: 'dn-hlo', 'data-kind': r.kind, 'data-color': r.color || 'yellow', key: 'o' + ln + '_' + k, style: { left: lo + 'px', top: r.top + 'px', width: Math.max(1, hi - lo) + 'px', height: Math.max(2, r.bottom - r.top) + 'px' } }))
           }
         }
       }
@@ -1278,8 +1511,58 @@ return {
         const p1 = posToPoint(first.line, first.col)
         const p2 = posToPoint(last.line, last.col)
         const ovPe = pressing ? 'none' : 'auto'
-        if (p1) bodyKids.push(h('div', { className: 'dn-handle', key: 'ha', style: { left: p1.x + 'px', top: (p1.y + (p1.h || 18) / 2) + 'px', pointerEvents: ovPe }, onPointerDown: handleDown('a') }))
-        if (p2) bodyKids.push(h('div', { className: 'dn-handle', key: 'hf', style: { left: p2.x + 'px', top: (p2.y + (p2.h || 18) / 2) + 'px', pointerEvents: ovPe }, onPointerDown: handleDown('f') }))
+        // Native-style handles: a small dot with a stem whose tip sits exactly on
+        // the caret (start handle above it, end handle below), wrapped in a 44x44
+        // hit area — Apple's minimum touch target, and the reason a finger could
+        // not reliably grab the old 12px circles.
+        function teardropHandle(which, pt, key) {
+          const up = which === 'a'
+          // Keep the handle inside whatever is actually visible. Inside a table the
+          // caret's x can far exceed the body's width (the table scrolls on its own),
+          // so the clamp uses the wrapper's visible box there — otherwise the handle
+          // was clipped away by overflow-x and could not be grabbed at all.
+          const hostEl = bodyRef.current
+          const lineEl = lineEls.current[pt.line]
+          const wrapEl = lineEl && lineEl.closest ? lineEl.closest('[data-dn-table]') : null
+          let minX = 24, maxX = (hostEl ? hostEl.clientWidth : geo.width) - 24
+          if (wrapEl && hostEl) {
+            const wr = wrapEl.getBoundingClientRect()
+            const hr = hostEl.getBoundingClientRect()
+            const base = hr.left - hostEl.scrollLeft
+            minX = (wr.left - base) + 24
+            maxX = (wr.right - base) - 24
+          }
+          const tipX = Math.min(Math.max(pt.x, minX), Math.max(minX, maxX))
+          const tipY = pt.y + (pt.h || 18) / 2
+          return h('div', {
+            className: 'dn-handle', key: key, 'data-tip': up ? 'down' : 'up',
+            style: { left: (tipX - 22) + 'px', top: (tipY - (up ? 31 : 13)) + 'px', pointerEvents: ovPe },
+            onPointerDown: handleDown(which),
+          }, [
+            h('span', { className: 'dn-handle-tail', key: 't' }),
+            h('span', { className: 'dn-handle-dot', key: 'd' }),
+          ])
+        }
+        if (p1) bodyKids.push(teardropHandle('a', p1, 'ha'))
+        if (p2) bodyKids.push(teardropHandle('f', p2, 'hf'))
+        if (magnify) {
+          const o = bodyOrigin()
+          const raw = String(textRef.current).split(String.fromCharCode(10))[magnify.line - 1] || ''
+          const col = Math.max(0, Math.min(magnify.col, raw.length))
+          const half = 6
+          const from = Math.max(0, col - half)
+          const snippet = (raw.slice(from, from + half * 2) + '  ').slice(0, half * 2 + 2)
+          const at = col - from
+          const w = Math.min(210, Math.max(96, snippet.length * 9 + 24))
+          bodyKids.push(h('div', {
+            className: 'dn-loupe', key: 'loupe',
+            style: { left: Math.min(Math.max(4, magnify.x - o.left - w / 2), Math.max(4, (bodyRef.current ? bodyRef.current.clientWidth : geo.width) - w - 4)) + 'px', top: (magnify.y - o.top - 62) + 'px', width: w + 'px' },
+          }, [
+            h('span', { key: 'a' }, snippet.slice(0, at)),
+            h('span', { className: 'dn-loupe-caret', key: 'c' }),
+            h('span', { key: 'b' }, snippet.slice(at)),
+          ]))
+        }
         // Follow the caret the gesture finished on: dragging down puts the bar
         // under the selection, dragging up puts it above it, so the toolbar never
         // covers the text being selected and never jumps to the far end.
