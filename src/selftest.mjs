@@ -126,6 +126,32 @@ ok('dispatches a real method and returns { ok, result }', stateCall.status === 2
 const view = stateCall.parsed && stateCall.parsed.result
 ok('state view carries the note contract', view && 'text' in view && Array.isArray(view.selections) && 'revision' in view && 'relPath' in view, view && Object.keys(view).slice(0, 6).join(','))
 
+// A session that never took part (no tool call, no sessionId in the RPC) must not be
+// able to learn anything about the note. Regression guard for accidental activation.
+const idleCall = await rpc('state', { revision: -1, sessionId: '' })
+const idleView = idleCall.parsed && idleCall.parsed.result
+ok('a non-participating session is told nothing about the note',
+  idleView && idleView.inactive === true && idleView.text === '' && idleView.sessionId === '' && idleView.path === '' && idleView.selections.length === 0,
+  idleView && JSON.stringify({ inactive: idleView.inactive, text: idleView.text.length, sid: idleView.sessionId, path: idleView.path }))
+ok('a non-participating session cannot mutate the store',
+  (await rpc('saveText', { text: 'x', sessionId: '' })).parsed.result.ok === false &&
+  (await rpc('addSelection', { sessionId: '' })).parsed.result.ok === false &&
+  (await rpc('clearSelections', { sessionId: '' })).parsed.result.ok === false &&
+  (await rpc('clearSelections', { sessionId: '' })).parsed.result.error === 'inactive',
+  'write RPCs answered ok:false/inactive')
+
+// The implicit adoption path must be gone: "exactly one live agent" used to be enough
+// to claim a session, which is what made the card appear in unrelated sessions.
+// Comments legitimately mention the removed names, so strip them before asserting.
+const hostSource = fs.readFileSync(path.join(lib, 'index.js'), 'utf8')
+const hostCode = hostSource.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')
+ok('no implicit session adoption remains',
+  !/\bownFromAgents\b/.test(hostCode) && !/\bcurrentInitiator\b/.test(hostCode) && !/\bcandidateFromLiveAgents\b/.test(hostCode),
+  'ownFromAgents/currentInitiator/candidateFromLiveAgents absent from the host code')
+ok('every note tool resolves its workspace explicitly and loudly',
+  (hostSource.match(/await enterFromTool\('note_/g) || []).length === 14,
+  String((hostSource.match(/await enterFromTool\('note_/g) || []).length) + ' guarded tool entry points')
+
 // ───────────────────────────────────────────────────────── client half ──
 console.log('client half')
 

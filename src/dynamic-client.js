@@ -747,6 +747,10 @@ return {
       React.useEffect(function () { bump() }, [geo.width, geo.mode, panel, hidden, mode, bounds.w, bounds.h, st ? st.revision : -1])
       function applyState(r) {
         if (!r || r.unchanged) return
+        // `inactive` means this store does not belong to this session (the note now
+        // requires an explicit action before it participates). Clearing the state is
+        // what removes the card; without it the last known note kept being rendered.
+        if (r.inactive) { revRef.current = r.revision; textRef.current = ''; setSt(null); return }
         revRef.current = r.revision
         textRef.current = r.text
         setSt(r)
@@ -1058,7 +1062,7 @@ return {
         const rangeArgs = blkRange
           ? { startLine: blkRange.from, startCol: 0, endLine: blkRange.to, endCol: (blkLines[blkRange.to - 1] || '').length }
           : { startLine: first.line, startCol: first.col, endLine: last.line, endCol: last.col }
-        host.call('addSelection', Object.assign({ color: penColor }, rangeArgs)).then(function (r) {
+        host.call('addSelection', Object.assign({ color: penColor, sessionId: sidRef.current }, rangeArgs)).then(function (r) {
           if (r && r.ok) {
             revRef.current = r.revision
             setSt(function (prev) { return prev ? Object.assign({}, prev, { revision: r.revision, selections: r.selections }) : prev })
@@ -1093,7 +1097,7 @@ return {
         return go.then(function (ok) {
           if (!ok) return undefined
           setBusy('提交中')
-          return host.call('commit', { message: 'note: ' + new Date().toLocaleString() }).then(function (r) {
+          return host.call('commit', { message: 'note: ' + new Date().toLocaleString(), sessionId: sidRef.current }).then(function (r) {
             setBusy('')
             if (r && r.ok) {
               if (r.nothing) notify('没有需要提交的改动')
@@ -1116,12 +1120,12 @@ return {
         }).catch(function (err) { notify('重载失败: ' + err.message) })
       }
       function clearSelections() {
-        host.call('clearSelections', {}).then(function (r) {
+        host.call('clearSelections', { sessionId: sidRef.current }).then(function (r) {
           if (r && r.ok) { revRef.current = r.revision; setSt(function (prev) { return prev ? Object.assign({}, prev, { revision: r.revision, selections: r.selections }) : prev }); notify('已清空全部选中') }
         })
       }
       function removeSelection(id) {
-        host.call('removeSelection', { id: id }).then(function (r) {
+        host.call('removeSelection', { id: id, sessionId: sidRef.current }).then(function (r) {
           if (r && r.ok) { revRef.current = r.revision; setSt(function (prev) { return prev ? Object.assign({}, prev, { revision: r.revision, selections: r.selections }) : prev }) }
         })
       }
