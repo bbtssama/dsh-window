@@ -84,8 +84,12 @@ const CSS = [
 '.dn-em{font-style:italic;}',
 '.dn-del{text-decoration:line-through;opacity:.7;}',
 '.dn-lnk{color:#3b6fe0;text-decoration:underline;}',
-'.dn-img{max-width:100%;height:auto;border-radius:8px;display:block;margin:8px auto;background:rgba(0,0,0,.03);}',
-'.dn-imglink{display:block;text-decoration:none;cursor:pointer;-webkit-touch-callout:none;-webkit-user-drag:none;}',
+// `min-width:0` matters inside a flex/grid parent: without it the intrinsic width of a
+// wide image can push the box wider than the card, which is how images ended up
+// clipped past the right edge on a narrow screen. `object-fit` plus `max-width:100%`
+// keeps an oversized image inside its column.
+'.dn-img{max-width:100%;min-width:0;height:auto;border-radius:8px;display:block;margin:8px auto;background:rgba(0,0,0,.03);}',
+'.dn-imglink{display:block;min-width:0;max-width:100%;text-decoration:none;cursor:pointer;-webkit-touch-callout:none;-webkit-user-drag:none;}',
 '.dn-imglink img{-webkit-touch-callout:none;-webkit-user-drag:none;}',
 '.dn-imglink:hover .dn-img{outline:2px solid rgba(90,150,255,.55);outline-offset:2px;}',
 // A tint behind an image is invisible: the image is opaque and covers it. An image
@@ -100,7 +104,10 @@ const CSS = [
 '.dn-hlo[data-img="1"][data-color=black]{background:#000;z-index:2;border-color:#000;}',
 '.dn-img-hl{outline:3px solid rgba(255,214,0,.9);outline-offset:2px;}',
 '.dn-img-hl-live{outline:3px solid rgba(90,150,255,.95);outline-offset:2px;}',
-'.dn-imgfail{display:flex;gap:6px;align-items:center;justify-content:center;font-size:11.5px;color:var(--dsw-alias-label-tertiary,#8a8f98);border:1px dashed rgba(0,0,0,.18);border-radius:8px;padding:8px 10px;margin:8px 0;word-break:break-all;}',
+// A flex row cannot wrap a long URL: the icon stayed on one line and the text ran out
+// of the dashed box (".png" visibly outside it). inline-block with wrapping text keeps
+// the whole message inside the border.
+'.dn-imgfail{display:block;font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-tertiary,#8a8f98);border:1px dashed rgba(0,0,0,.18);border-radius:8px;padding:8px 10px;margin:8px 0;max-width:100%;box-sizing:border-box;overflow-wrap:anywhere;word-break:break-word;white-space:normal;}',
 '.dn-html-kbd{border:1px solid rgba(0,0,0,.2);border-bottom-width:2px;border-radius:5px;padding:0 4px;font-family:ui-monospace,Consolas,monospace;font-size:12px;}',
 '.dn-html-mark{background:rgba(255,214,0,.5);border-radius:2px;}',
 '.dn-twrap{overflow:auto;margin:10px 0;border:1px solid rgba(0,0,0,.12);border-radius:9px;background:rgba(0,0,0,.02);}',
@@ -535,10 +542,17 @@ return {
         }).catch(function () { assetCache[key] = null; if (alive) setFailed(true) })
         return function () { alive = false }
       }, [props.href])
+      // A key on the resolved source forces a fresh <img> element when the source
+      // changes (a local path resolving to its data URL). Reusing one node while the
+      // src is still empty leaves the browser's own broken-image glyph and the alt
+      // text on screen — the "broken 本地 png" look — because the node was created
+      // before a usable src existed.
+      const src = dataUrl || (isLocalRef(props.href) ? '' : imgSrc(props.href))
       if (failed) return h('span', { className: 'dn-imgfail' }, ['\ud83d\uddbc 图片无法读取：' + String(props.href || '')])
-      if (state === 'ok' && (dataUrl || !isLocalRef(props.href))) {
+      if (state === 'ok' && src) {
         return h('img', {
-          className: props.cls, src: dataUrl || imgSrc(props.href), alt: props.alt || '',
+          key: src.length > 64 ? src.slice(0, 64) + src.length : src,
+          className: props.cls, src: src, alt: props.alt || '',
           'data-soff': props.soff, 'data-img-len': props.len, loading: 'lazy', decoding: 'async', draggable: false,
           // A lazy image is 0x0 until it decodes, so everything below it sits higher than
           // it will afterwards. Re-measure once the real box exists, otherwise a highlight
@@ -876,6 +890,13 @@ return {
             if (!tn) {
               if (Number.isFinite(imgLen)) {
                 const r = s.getBoundingClientRect()
+                // A lazy image that has not loaded yet measures 0x0. Recording it as a
+                // cell gave the overlay a phantom zero-height box, and the block-level
+                // fallback then tinted the element — the blue rectangle sitting where a
+                // photo was still loading. Skip it until it has a real box; `onLoad`
+                // bumps the geometry so the cell appears once it does.
+                const isImg = s.tagName === 'IMG' || (imgLen > 0 && !tn)
+                if (isImg && (r.width < 1 || r.height < 1)) continue
                 cells.push({ off: soff, len: imgLen, img: true, top: r.top - o.top, bottom: r.bottom - o.top, left: r.left - o.left, right: r.right - o.left })
               }
               continue
