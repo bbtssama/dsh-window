@@ -581,6 +581,10 @@ return {
       // positioning); null when no drag is in flight.
       const [magnify, setMagnify] = React.useState(null)
       const editBlockRef = React.useRef(null)
+      // Which caret the last gesture moved. The action bar must follow THAT caret:
+      // it used to always anchor at the focus end, so dragging the start handle
+      // popped the bar up at the other end of the selection.
+      const barAtRef = React.useRef('f')
       const blockEditorRef = React.useRef(null)
       // Render cache for the note body (see the call site): the same element
       // objects let React skip those subtrees on a live-selection update.
@@ -1079,6 +1083,7 @@ return {
         throttleRef.current = 0
         const p = pendingRef.current, d = drag.current
         if (!p || !d) return
+        barAtRef.current = d.mode === 'handle' ? d.which : 'f'
         if (d.mode === 'drag') {
           setLive(function (prev) { if (!prev) return prev; if (samePos(prev.f, p)) return prev; return { a: prev.a, f: p } })
         } else if (d.mode === 'handle') {
@@ -1563,19 +1568,23 @@ return {
             h('span', { key: 'b' }, snippet.slice(at)),
           ]))
         }
-        // Follow the caret the gesture finished on: dragging down puts the bar
-        // under the selection, dragging up puts it above it, so the toolbar never
-        // covers the text being selected and never jumps to the far end.
-        const focusUp = cmpPos(live.f, live.a) <= 0
-        const focusPt = posToPoint(live.f.line, live.f.col)
-        const anchor = focusPt || p1 || p2
+        // Anchor the bar on the caret the gesture actually moved: the dragged handle
+        // when a handle is dragged, the pointer otherwise. It sits above the
+        // selection when that caret is the upper end, below it when it is the lower
+        // end, so it never covers the text being selected.
+        const anchorAtStart = barAtRef.current === 'a'
+        const anchorCaret = anchorAtStart ? live.a : live.f
+        const otherCaret = anchorAtStart ? live.f : live.a
+        const anchorUp = cmpPos(anchorCaret, otherCaret) <= 0
+        const anchorPt = posToPoint(anchorCaret.line, anchorCaret.col)
+        const anchor = anchorPt || p1 || p2
         if (anchor && barReady) {
           const barHost = bodyRef.current
           const belowY = anchor.y + (anchor.h || 18) + 6
           const aboveY = Math.max(4, anchor.y - 42)
           const visibleBelow = barHost ? belowY - barHost.scrollTop + 42 : 0
           const fitsBelow = !barHost || visibleBelow < barHost.clientHeight
-          const barTop = focusUp ? aboveY : (fitsBelow ? belowY : aboveY)
+          const barTop = anchorUp ? aboveY : (fitsBelow ? belowY : aboveY)
           bodyKids.push(h('div', { className: 'dn-bar', key: 'bar', style: { left: Math.max(4, anchor.x - 10) + 'px', top: barTop + 'px', pointerEvents: ovPe } }, [
             h('span', { className: 'dn-pen', key: 'pen' }, [
               h('button', { className: 'dn-pen-sw', key: 'cur', 'data-c': penColor, 'data-on': 'true', title: '本次高亮颜色（默认黄）', onClick: function (e) { e.stopPropagation(); setPenOpen(!penOpen) } }),
