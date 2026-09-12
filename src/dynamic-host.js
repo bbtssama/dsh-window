@@ -297,13 +297,55 @@ return {
         if (!wasReady) S.revision += 1
       } catch (err) { S.gitReady = false; fail('git', err) }
     }
+    /**
+     * Session id of a tool caller / RPC payload, or '' when unidentified.
+     */
+    function sessionIdOfExec(exec) {
+      try { const hd = exec && exec.agent && exec.agent.session && exec.agent.session.header ? exec.agent.session.header : null; return hd && typeof hd.id === 'string' ? hd.id : '' } catch (err) { return '' }
+    }
+    /** Session id from a systemPrompt assembly context (`{ agent, scope }`). */
+    function sessionIdOfContext(context) {
+      try { const hd = context && context.agent && context.agent.session && context.agent.session.header ? context.agent.session.header : null; return hd && typeof hd.id === 'string' ? hd.id : '' } catch (err) { return '' }
+    }
+    /**
+     * Whether the recorded owning session is still running. Used to decide if the store
+     * may be taken over: after a dsh restart the old session is gone and the note must
+     * be adoptable again, but while it is alive a second session must not claim it —
+     * that is what made a brand-new session "load the plugin by itself".
+     */
+    function ownerIsLive() {
+      if (!sessionId) return false
+      try {
+        if (!agents || typeof agents.list !== 'function') return false
+        const list = agents.list()
+        if (!list || !list.length) return false
+        for (let i = 0; i < list.length; i++) {
+          const a = list[i]
+          const hd = a && a.session && a.session.header ? a.session.header : null
+          if (hd && hd.id === sessionId) return true
+        }
+        return false
+      } catch (err) { return false }
+    }
+    /**
+     * True when this caller is a *different, identified* session while a live session
+     * owns the store. Such a caller is refused rather than silently served: it would
+     * otherwise read another session's note or take it over.
+     */
+    function foreignCaller(callerId) {
+      return !!(callerId && sessionId && callerId !== sessionId && ownerIsLive())
+    }
     function adoptFrom(ses, authority) {
       if (!ses) return false
       let sid = ''
       try { const hd = ses.header || {}; if (typeof hd.id === 'string') sid = hd.id } catch (err) { sid = '' }
       if (sid) {
-        if (authority) sessionId = sid
-        else {
+        if (authority) {
+          // Taking over is allowed only when the store is unowned or its owner has
+          // ended. A live owner keeps it — see ownerIsLive().
+          if (sessionId && sid !== sessionId && ownerIsLive()) return false
+          sessionId = sid
+        } else {
           if (sessionId && sid !== sessionId) return false
           if (!sessionId) sessionId = sid
         }
@@ -442,12 +484,18 @@ return {
       }
       return out
     }
-    function stateView() {
+    function stateView(callerId) {
       // A session that never took part in this store must not learn that a note
       // exists at all: reporting an owner is what let a brand-new session render the
       // card and read another workspace's note. Participation is granted only by an
       // explicit action (see ensureLoaded), so before that this is a plain "not mine".
-      if (!confirmed) {
+      //
+      // The same holds for an *identified* session that is not the owner while the owner
+      // is still running: it gets the opaque answer too (plus the owner's id, so a human
+      // can tell why). Only an unidentified caller — which cannot be a session — or the
+      // owner itself sees the note.
+      const foreign = !!(callerId && sessionId && callerId !== sessionId)
+      if (!confirmed || foreign) {
         return {
           revision: S.revision,
           text: '',
@@ -459,7 +507,9 @@ return {
           confirmed: false,
           touched: false,
           sessionId: '',
-          // Deliberately opaque: no path, no owner, no content.
+          // Deliberately opaque: no path, no content. The owner id is reported only so
+          // the human can see which session holds it.
+          ownerSessionId: foreign ? sessionId : '',
           inactive: true,
         }
       }
@@ -587,6 +637,14 @@ return {
     // requireCaptain: a tool that quietly picked a workspace by guessing is how a
     // session ended up reading a note it never asked for.
     async function enterFromTool(where, exec) {
+      const callerId = sessionIdOfExec(exec)
+      // A different, still-running session must not be served at all — reading included.
+      // Without this a new session's agent could call a note_* tool, be handed the other
+      // session's note, and (through the authority path below) take it over; that is what
+      // "a new session loaded the plugin by itself" looked like.
+      if (foreignCaller(callerId)) {
+        throw new Error(where + ' 被拒绝：这份笔记归属另一个仍在运行的会话（' + sessionId + '）。同一个工作区同时只允许一个会话拥有它。若用户希望在本会话里使用笔记卡片，请先结束或释放原会话，或在本会话中显式要求接管。')
+      }
       const moved = adoptFromExec(exec)
       if (!confirmed) {
         throw new Error(where + ' 无法确定本会话的工作区：调用方没有可用的 agent/会话上下文。请在正常会话里调用，或先用 note_diag 确认归属。')
@@ -737,12 +795,13 @@ return {
       },
     }))
     harness.handle('state', async function (args) {
-      const moved = await adoptFromHint(args && args.sessionId)
+      const callerId = args && typeof args.sessionId === 'string' ? args.sessionId : ''
+      const moved = await adoptFromHint(callerId)
       await ensureLoaded()
       if (moved) await migrate()
       const rev = args && typeof args.revision === 'number' ? args.revision : -1
       if (rev === S.revision) return { unchanged: true, revision: S.revision }
-      return stateView()
+      return stateView(callerId)
     })
     // Writes must never happen on behalf of a session that did not identify itself:
     // without this, a poll from an unrelated session could mutate the store of
@@ -755,6 +814,7 @@ return {
       const moved = await adoptFromHint(a.sessionId)
       if (moved) { await ensureLoaded(); await migrate() }
       if (!confirmed) return notMine('saveText')
+      if (foreignCaller(a.sessionId)) return notMine('saveText')
       return await withNoteLock(noteLockKey(), function () {
         return saveText(a.text, typeof a.baseRevision === 'number' ? a.baseRevision : undefined)
       })
@@ -764,11 +824,13 @@ return {
       const moved = await adoptFromHint(a.sessionId)
       if (moved) { await ensureLoaded(); await migrate() }
       if (!confirmed) return notMine('addSelection')
+      if (foreignCaller(a.sessionId)) return notMine('addSelection')
       return await withNoteLock(noteLockKey(), function () { return addSelection(a) })
     })
     harness.handle('removeSelection', async function (args) {
       await ensureLoaded()
       if (!confirmed) return notMine('removeSelection')
+      if (foreignCaller(args && args.sessionId)) return notMine('removeSelection')
       return await withNoteLock(noteLockKey(), async function () {
         const id = args && args.id ? String(args.id) : ''
         S.selections = S.selections.filter(function (s) { return s.id !== id })
@@ -780,6 +842,7 @@ return {
     harness.handle('clearSelections', async function () {
       await ensureLoaded()
       if (!confirmed) return notMine('clearSelections')
+      if (foreignCaller(args && args.sessionId)) return notMine('clearSelections')
       return await withNoteLock(noteLockKey(), async function () {
         S.selections = []
         S.revision += 1
@@ -790,6 +853,7 @@ return {
     harness.handle('commit', async function (args) {
       await ensureLoaded()
       if (!confirmed) return notMine('commit')
+      if (foreignCaller(args && args.sessionId)) return notMine('commit')
       return await withNoteLock(noteLockKey(), function () {
         return commit(args && args.message ? args.message : '')
       })
@@ -835,8 +899,9 @@ return {
             order: 152,
             text: [
               '## 右侧笔记卡片(note.md 知识笔记)',
-              '这个会话的界面右侧悬浮着一张 Markdown 笔记卡片，它的正文就是当前工作目录下的 `' + NOTE_DIR + '/' + NOTE_FILE + '`，受 git 管理。',
-              '工作方式:',
+              '这个会话的界面右侧可能悬浮着一张 Markdown 笔记卡片，它的正文是当前工作目录下的 `' + NOTE_DIR + '/' + NOTE_FILE + '`，受 git 管理。',
+              '{{dsh_window_note_scope}}',
+              '工作方式(仅当你归属于这张卡片时适用):',
               '- 用户问知识性问题、要求讲解/总结/整理时，不要只在对话里长篇回复: 用 `note_write`(默认追加)把讲解写进笔记，内容会立刻显示在卡片里，用户就不必往上翻聊天记录。对话里只留简短的口头交付与要点提示。',
               '- 每次回答用户之前，先调用 `note_take_new_selections`: 它返回用户自上次取用以来新划选的重点(含行号与原文)，并把这些对象标记为已取用。用户划线往往就是"这里我不懂/我要你展开"。',
               '- 需要回顾全部划线时用 `note_get_selections`; 需要笔记全文(含行号)时用 `note_read`，也可以直接用 `read` 工具读该文件。',
@@ -851,6 +916,29 @@ return {
             ].join('\n'),
           })
         })
+        // Which session owns the card cannot be decided when the section is registered —
+        // it changes as sessions come and go. A prompt VARIABLE can: the assembly context
+        // carries the agent (`assembleContextFor` returns `{ agent, scope: agent }`), so
+        // the provider below answers per session, and the section above interpolates it.
+        // This is what keeps a brand-new session from being told to call note_* tools at
+        // all, while the owning session keeps its proactive workflow.
+        if (typeof systemPrompt.variable === 'function') {
+          ctx.effect(function () {
+            return systemPrompt.variable('dsh_window_note_scope', function (context) {
+              const sid = sessionIdOfContext(context)
+              if (!sessionId) {
+                return '归属：这张卡片还没有归属会话。若用户在本会话里提到笔记/卡片/划线，你调用任一 `note_*` 工具即由本会话接管（同一个工作区只允许一个会话拥有）。'
+              }
+              if (sid && sid === sessionId) {
+                return '归属：**本会话就是这张卡片的归属会话**。下面的工作方式全部适用，包括回答前先取用户的新划线。'
+              }
+              if (ownerIsLive()) {
+                return '归属：这张卡片归属**另一个仍在运行的会话**，本会话没有它。**不要调用任何 `note_*` 工具**（会被拒绝，不会成功），也不要在回答里提到这张卡片。除非用户在本会话里明确要求使用/接管笔记卡片，那时再说明它被另一个会话占用。'
+              }
+              return '归属：这张卡片存在于当前工作区，但它此前归属的会话已经结束。若用户在本会话里提到笔记/卡片/划线，你调用任一 `note_*` 工具即由本会话接管；用户没提就不要碰。'
+            })
+          })
+        }
       } catch (err) { fail('注册段落失败', err) }
     }
 

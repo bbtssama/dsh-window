@@ -75,6 +75,19 @@ const sessions = {
 function sessionWith(id, cwd) { return { header: { id, cwd } } }
 const OWNER = 'sess-owner-111'
 sessions._m.set(OWNER, sessionWith(OWNER, WORKSPACE))
+// The plugin captures its services when apply() runs, so the live-agent list has to be
+// reachable through the SAME object the whole time — mutating it is how these tests
+// simulate "the owning session is still running" vs "it has ended".
+let liveList = [{ session: sessionWith(OWNER, WORKSPACE) }]
+const agentsService = { currentInitiator: () => null, list: () => liveList }
+// systemPrompt.section(...) plus the variable provider the section interpolates.
+const promptSections = []
+const promptVariables = new Map()
+const promptService = {
+  section(spec) { promptSections.push(spec); return () => { } },
+  variable(name, provider) { promptVariables.set(name, provider); return () => { } },
+  add() { return () => { } },
+}
 
 const ctx = {
   get(name) {
@@ -82,7 +95,7 @@ const ctx = {
     if (name === 'shell') return shell
     if (name === 'sandboxPolicy') return policy
     if (name === 'sessions') return sessions
-    if (name === 'agents') return { currentInitiator: () => null, list: () => [] }
+    if (name === 'agents') return agentsService
     if (name === 'tools') return toolsRegistry
     // The real webServer contract: register({ kind, path, handler }) -> disposer.
     if (name === 'webServer') {
@@ -94,8 +107,7 @@ const ctx = {
         },
       }
     }
-    // registerPromptSection wants systemPrompt.section(...).
-    if (name === 'systemPrompt') return { section() { return () => { } }, add() { return () => { } } }
+    if (name === 'systemPrompt') return promptService
     return undefined
   },
   // The plugin wraps its route registration in ctx.effect(...), so the effect must
@@ -177,9 +189,44 @@ ok('explicit tool call returns the real note', r5 && /机密内容/.test(r5.text
 const owned = await rpc('state', { revision: -1, sessionId: OWNER })
 ok('participating session sees its note', owned && owned.result && owned.result.inactive !== true && /机密内容/.test(owned.result.text), JSON.stringify(owned && owned.result && owned.result.text.slice(0, 20)))
 
-// 7. A different session still cannot see it.
+// 7. A different session cannot see it — and now gets the opaque answer with the owner
+//    named, rather than the note plus the owner id.
 const other = await rpc('state', { revision: -1, sessionId: 'sess-someone-else' })
-ok('a different session cannot see the owned note', other && other.result && other.result.inactive !== true && other.result.sessionId === OWNER && other.result.sessionId !== 'sess-someone-else', JSON.stringify(other && other.result && { sid: other.result.sessionId }))
+ok('a different session is refused and told who owns it',
+  other && other.result && other.result.inactive === true && other.result.text === '' && other.result.ownerSessionId === OWNER,
+  JSON.stringify(other && other.result && { inactive: other.result.inactive, textLen: (other.result.text || '').length, owner: other.result.ownerSessionId }))
+
+// ── a LIVE owner must be protected from takeover ────────────────────────────────
+// This is the reported symptom: a brand-new session in the same workspace got the card.
+console.log('live-owner protection')
+const FOREIGN = 'sess-newcomer-222'
+sessions._m.set(FOREIGN, sessionWith(FOREIGN, WORKSPACE))
+
+const newcomer = await rpc('state', { revision: -1, sessionId: FOREIGN })
+ok('a newcomer in the same workspace is told nothing',
+  newcomer && newcomer.result && newcomer.result.inactive === true && newcomer.result.text === '' && newcomer.result.ownerSessionId === OWNER,
+  JSON.stringify(newcomer && newcomer.result && { inactive: newcomer.result.inactive, textLen: newcomer.result.text.length, owner: newcomer.result.ownerSessionId }))
+const newcomerWrite = await rpc('saveText', { text: 'stolen', sessionId: FOREIGN })
+ok('a newcomer cannot write', newcomerWrite && newcomerWrite.result && newcomerWrite.result.ok === false && newcomerWrite.result.error === 'inactive', JSON.stringify(newcomerWrite && newcomerWrite.result))
+
+let refused = ''
+try { await t.execute({}, { agent: { session: sessionWith(FOREIGN, WORKSPACE) } }) } catch (e) { refused = String(e.message || e) }
+ok('a newcomer tool call is refused loudly', /被拒绝/.test(refused) && /note_read/.test(refused), refused.slice(0, 100))
+ok('the refusal left the note untouched', /机密内容/.test(files.get('C:/WS/own/dsh-note/note.md')), 'note.md on disk is intact')
+ok('the prompt tells a newcomer not to call note tools',
+  (() => { const f = promptVariables.get('dsh_window_note_scope'); return !!f && /不要调用任何/.test(String(f({ agent: { session: sessionWith(FOREIGN, WORKSPACE) } }))) })(),
+  'variable dsh_window_note_scope answers per session')
+ok('the prompt tells the owner to use them',
+  (() => { const f = promptVariables.get('dsh_window_note_scope'); return !!f && /归属会话/.test(String(f({ agent: { session: sessionWith(OWNER, WORKSPACE) } }))) })(),
+  'owner text present')
+
+// ── once the owner has ended, the store becomes adoptable again ─────────────────
+console.log('takeover after the owner ends')
+liveList = []
+const reclaimed = await t.execute({}, { agent: { session: sessionWith(FOREIGN, WORKSPACE) } })
+ok('a tool call takes over once the owner has ended', !!reclaimed && /机密内容/.test(reclaimed.text), JSON.stringify(reclaimed && String(reclaimed.text).slice(0, 24)))
+const nowForeign = await rpc('state', { revision: -1, sessionId: OWNER })
+ok('and the old owner is now the foreign one', nowForeign && nowForeign.result && nowForeign.result.inactive === true && nowForeign.result.ownerSessionId === FOREIGN, JSON.stringify(nowForeign && nowForeign.result && { inactive: nowForeign.result.inactive, owner: nowForeign.result.ownerSessionId }))
 
 console.log(failed === 0 ? '\nALL ACTIVATION CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')
 process.exit(failed === 0 ? 0 : 1)
