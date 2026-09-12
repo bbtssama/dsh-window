@@ -518,7 +518,13 @@ return {
           mm.initialize({ startOnLoad: false, securityLevel: 'strict', htmlLabels: false, theme: 'default', fontFamily: 'inherit' })
           return mm.render('dnm-' + props.line + '-' + hashStr(mmdSource), mmdSource)
         }).then(function (out) {
-          if (alive && out && typeof out.svg === 'string') setMmdSvg(out.svg)
+          if (alive && out && typeof out.svg === 'string') {
+            setMmdSvg(out.svg)
+            // The diagram's real height only exists now, so drop the cached geometry
+            // and re-measure — otherwise a block selection (and the overlay drawn from
+            // it) keeps the pre-render size.
+            try { bump() } catch (err) { }
+          }
         }).catch(function (err) {
           // Surface the reason. Silently falling back to the built-in renderer is
           // exactly why the mobile failure looked like "原因不明".
@@ -664,8 +670,18 @@ return {
         const nodes = host.querySelectorAll('[data-dn-table], .dn-pre, .dn-mmd')
         const onScroll = function () { bump() }
         for (let i = 0; i < nodes.length; i++) { try { nodes[i].addEventListener('scroll', onScroll, { passive: true }) } catch (err) { } }
+        // Content that grows after the first measurement (a Mermaid diagram whose SVG
+        // arrives asynchronously, a remote image that loads later) left a stale rect in
+        // the geometry cache — a block selection then covered only the old height. A
+        // ResizeObserver on those boxes invalidates the cache whenever they resize.
+        let ro = null
+        try {
+          ro = new ResizeObserver(function () { bump() })
+          for (let i = 0; i < nodes.length; i++) ro.observe(nodes[i])
+        } catch (err) { ro = null }
         return function () {
           for (let i = 0; i < nodes.length; i++) { try { nodes[i].removeEventListener('scroll', onScroll) } catch (err) { } }
+          try { if (ro) ro.disconnect() } catch (err) { }
         }
       }, [st ? st.text : ''])
       React.useEffect(function () {
@@ -1202,6 +1218,17 @@ return {
           const d = drag.current
           if (!d || !d.pt || d.mode !== 'press') return
           d.mode = 'drag'
+          if (!cellsOf(d.pt.line).cells.length) {
+            // A block with no character boxes (a Mermaid diagram, an image) cannot be
+            // word-selected, and line/column math cannot express "this whole block":
+            // only the opening fence line owns a rendered element, so an end position
+            // on an inner line produced no second handle and no highlight. The
+            // selection is carried as a flag and rendered from the element's rect.
+            const rangeBlock = blockRangeAt(d.pt.line)
+            const lineBlock = rangeBlock ? rangeBlock.from : d.pt.line
+            setLive({ a: { line: lineBlock, col: 0 }, f: { line: lineBlock, col: 0 }, block: true })
+            return
+          }
           const w = wordRange(d.pt)
           const a = Math.min(w.from, w.to), f = Math.max(w.from, w.to)
           setLive({ a: { line: d.pt.line, col: snapCol(d.pt.line, a) }, f: { line: d.pt.line, col: snapCol(d.pt.line, f) } })
@@ -1467,7 +1494,7 @@ return {
             byLine[ln].push({ from: ln === s.startLine ? s.startCol : 0, to: ln === s.endLine ? s.endCol : (lines[ln - 1] || '').length, kind: s.stale ? 'stale' : 'saved', color: s.color || 'yellow' })
           }
         }
-        if (live) {
+        if (live && !live.block) {
           const lo = cmpPos(live.a, live.f) <= 0 ? live.a : live.f
           const hi = cmpPos(live.a, live.f) <= 0 ? live.f : live.a
           for (let ln = lo.line; ln <= hi.line; ln++) {
@@ -1510,11 +1537,30 @@ return {
           }
         }
       }
+      if (live && live.block && mode === 'read') {
+        // One overlay covering the element, and handles on its top-left and
+        // bottom-left corners — "select the whole diagram" without any line maths.
+        const blkRec = cellsOf(live.a.line)
+        if (blkRec.rect) {
+          bodyKids.push(h('div', {
+            className: 'dn-hlo', 'data-kind': 'live', 'data-color': penColor, key: 'oblk',
+            style: { left: blkRec.rect.left + 'px', top: blkRec.rect.top + 'px', width: Math.max(1, blkRec.rect.right - blkRec.rect.left) + 'px', height: Math.max(2, blkRec.rect.bottom - blkRec.rect.top) + 'px' },
+          }))
+        }
+      }
       if (live && mode === 'read') {
         const first = cmpPos(live.a, live.f) <= 0 ? live.a : live.f
         const last = cmpPos(live.a, live.f) <= 0 ? live.f : live.a
-        const p1 = posToPoint(first.line, first.col)
-        const p2 = posToPoint(last.line, last.col)
+        let p1 = posToPoint(first.line, first.col)
+        let p2 = posToPoint(last.line, last.col)
+        if (live.block) {
+          const blk = cellsOf(live.a.line).rect
+          if (blk) {
+            const lh = 18
+            p1 = { x: blk.left, y: blk.top, h: lh }
+            p2 = { x: blk.left, y: Math.max(blk.top, blk.bottom - lh), h: lh }
+          }
+        }
         const ovPe = pressing ? 'none' : 'auto'
         // Native-style handles: a small dot with a stem whose tip sits exactly on
         // the caret (start handle above it, end handle below), wrapped in a 44x44
