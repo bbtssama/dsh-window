@@ -85,7 +85,8 @@ const CSS = [
 '.dn-del{text-decoration:line-through;opacity:.7;}',
 '.dn-lnk{color:#3b6fe0;text-decoration:underline;}',
 '.dn-img{max-width:100%;height:auto;border-radius:8px;display:block;margin:8px auto;background:rgba(0,0,0,.03);}',
-'.dn-imglink{display:block;text-decoration:none;cursor:pointer;}',
+'.dn-imglink{display:block;text-decoration:none;cursor:pointer;-webkit-touch-callout:none;-webkit-user-drag:none;}',
+'.dn-imglink img{-webkit-touch-callout:none;-webkit-user-drag:none;}',
 '.dn-imglink:hover .dn-img{outline:2px solid rgba(90,150,255,.55);outline-offset:2px;}',
 // A tint behind an image is invisible: the image is opaque and covers it. An image
 // selection therefore outlines the box instead, in the overlay layer (so a selection
@@ -168,6 +169,10 @@ const COMPACT_W = 640, DOCK_TOP = 34, DOCK_RIGHT = 18, DOCK_BOTTOM = 18
 // it just sat at the overlay slot's natural position, so it could not be tuned.
 const COMPACT_TOP = 12, COMPACT_INSET = 8
 const FLOAT_MARGIN = 10, CONV_GAP = 14, MIN_W = 320, MAX_W = 1000, MIN_CHAT = 380, THROTTLE_MS = 16
+// How far the pointer may wander after a long press before the picked unit (word,
+// image source, whole block) is abandoned in favour of a free range. A resting finger
+// on a touch screen easily drifts 10-20px.
+const UNIT_SLOP = 26
 const SIZES = [{ id: 'std', w: 430, label: '标准' }, { id: 'wide', w: 620, label: '宽版' }, { id: 'xl', w: 900, label: '超宽' }]
 const DEFAULT_LAYOUT = { mode: 'docked', x: null, y: null, w: 430, h: null, size: 'std' }
 const HTML_TAGS = { b: 1, strong: 1, i: 1, em: 1, u: 1, s: 1, del: 1, mark: 1, kbd: 1, sub: 1, sup: 1, small: 1, code: 1, span: 1, a: 1, cite: 1, q: 1, abbr: 1, ins: 1 }
@@ -534,7 +539,7 @@ return {
       if (state === 'ok' && (dataUrl || !isLocalRef(props.href))) {
         return h('img', {
           className: props.cls, src: dataUrl || imgSrc(props.href), alt: props.alt || '',
-          'data-soff': props.soff, 'data-img-len': props.len, loading: 'lazy', decoding: 'async',
+          'data-soff': props.soff, 'data-img-len': props.len, loading: 'lazy', decoding: 'async', draggable: false,
           // A lazy image is 0x0 until it decodes, so everything below it sits higher than
           // it will afterwards. Re-measure once the real box exists, otherwise a highlight
           // made while the image was unloaded keeps the wrong y and the handles drift.
@@ -671,6 +676,9 @@ return {
       const throttleRef = React.useRef(0)
       const pendingRef = React.useRef(null)
       const liveRef = React.useRef(null)
+      // Set when a long press fires; the click the browser emits on release is then
+      // swallowed so long-pressing a linked image selects it instead of opening it.
+      const navGuardRef = React.useRef(false)
       const geoRef = React.useRef({ ver: -1, lines: {} })
       sidRef.current = shownSessionId || ''
       function notify(msg) { setToast(msg) }
@@ -1173,7 +1181,9 @@ return {
         if (!p || !d) return
         barAtRef.current = d.mode === 'handle' ? d.which : 'f'
         if (d.mode === 'drag') {
-          setLive(function (prev) { if (!prev) return prev; if (samePos(prev.f, p)) return prev; return { a: prev.a, f: p } })
+          // `block` must survive: dropping it turned a whole-diagram selection back into
+          // a line/column range the moment anything moved.
+          setLive(function (prev) { if (!prev) return prev; if (samePos(prev.f, p)) return prev; return { a: prev.a, f: p, block: prev.block } })
         } else if (d.mode === 'handle') {
           const which = d.which
           setLive(function (prev) {
@@ -1202,6 +1212,21 @@ return {
             if (unbindRef.current) { const u = unbindRef.current; unbindRef.current = null; u() }
           }
           return
+        }
+        // A long press picks a unit — a word, an image's Markdown source, a whole
+        // diagram — and the finger is still resting on the screen afterwards, so a few
+        // pixels of jitter arrive as pointermove. Rewriting the end point on those moves
+        // destroyed the unit: it stretched the selection into the neighbouring text
+        // (reported as "long press on an image selects a big run of text") or snapped
+        // the end back onto the start column, leaving a==f and "没有选中文字". Keep the
+        // unit until the pointer really travels.
+        if (d.unit) {
+          const p0 = pointFromEvent(ev)
+          if (Math.abs(p0.x - d.x) <= UNIT_SLOP && Math.abs(p0.y - d.y) <= UNIT_SLOP) return
+          // A block is indivisible: dragging out of a diagram means nothing, so it stays
+          // selected as a whole. A word or an image may still be extended deliberately.
+          if (d.unit === 'block') return
+          d.unit = null
         }
         const p = pointFromEvent(ev)
         const pt = pointToPos(p.x, p.y)
@@ -1254,7 +1279,15 @@ return {
         if (mode !== 'read') return
         if (e.button !== undefined && e.button !== 0) return
         const tgt = e.target
-        if (tgt && tgt.closest && tgt.closest('a,button')) return
+        if (tgt && tgt.closest && tgt.closest('button')) return
+        // Ordinary links and buttons must keep working as links/buttons. A linked image
+        // (`[![alt](src)](href)` renders as a.dn-imglink) is content though: bailing out on
+        // it made the image impossible to long-press at all — no live selection, no bar.
+        const anchor = tgt && tgt.closest ? tgt.closest('a') : null
+        if (anchor && !(anchor.classList && anchor.classList.contains('dn-imglink'))) return
+        // A long press on that anchor must select the image rather than follow the link,
+        // so the click the browser fires on release is swallowed (see onClickCapture).
+        navGuardRef.current = false
         // Never begin a selection gesture on a scrollbar: dragging the table's
         // horizontal scrollbar used to run the long-press timer and leave a
         // stray selection behind. Only the scrollbar strip is excluded, so text
@@ -1290,6 +1323,9 @@ return {
           const d = drag.current
           if (!d || !d.pt || d.mode !== 'press') return
           d.mode = 'drag'
+          navGuardRef.current = true
+          // Marks this gesture as "one unit, not a free range" — see onDragMove.
+          d.unit = 'block'
           if (!cellsOf(d.pt.line).cells.length) {
             // A block with no character boxes (a Mermaid diagram, an image) cannot be
             // word-selected, and line/column math cannot express "this whole block":
@@ -1303,6 +1339,9 @@ return {
           }
           const w = wordRange(d.pt)
           const a = Math.min(w.from, w.to), f = Math.max(w.from, w.to)
+          // An image's own source range is a unit too (`snapCol` would otherwise collapse
+          // it to a zero-width range as the finger drifts), a word is as well.
+          d.unit = cellsOf(d.pt.line).cells.length === 1 && cellsOf(d.pt.line).cells[0].img ? 'image' : 'word'
           setLive({ a: { line: d.pt.line, col: snapCol(d.pt.line, a) }, f: { line: d.pt.line, col: snapCol(d.pt.line, f) } })
         }, 400)
         bindPointer(el)
@@ -1595,8 +1634,13 @@ return {
             // Mermaid diagrams and images have no character boxes, so they get a
             // single block-level tint over the whole element instead — a colour on
             // a diagram then reads as a faint mask laid across the graphic.
-            const rec = cellsOf(ln)
-            if (rec.rect) {
+            // Not for a degenerate *live* range though: that painted a whole blue block
+            // over the element while the range was empty, which is exactly why a broken
+            // long press still looked "selected" and then answered "没有选中文字".
+            const ranges = byLine[ln]
+            const emptyLiveOnly = ranges.length === 1 && ranges[0].kind === 'live' && ranges[0].to <= ranges[0].from
+            const rec = emptyLiveOnly ? null : cellsOf(ln)
+            if (rec && rec.rect) {
               const first = byLine[ln][0]
               rects.push({ row: Math.round(rec.rect.top), kind: first.kind, color: first.color, left: rec.rect.left, right: rec.rect.right, top: rec.rect.top, bottom: rec.rect.bottom })
             }
@@ -1782,7 +1826,12 @@ return {
         : [h('div', { key: 'none', style: { color: '#8a8f98' } }, '还没有选中内容。长按正文约 0.4 秒出现选择器，拖动两个圆点确定范围，再点[选中]。')]) : null
       return h('div', { className: 'dn-root', ref: rootRef, style: geo.style || undefined, 'data-panel-mode': geo.mode }, [
         head, actions,
-        h('div', { className: 'dn-body', key: 'body', ref: bodyRef, onPointerDown: onBodyDown, onDoubleClick: onDoubleClick }, bodyKids),
+        h('div', {
+          className: 'dn-body', key: 'body', ref: bodyRef, onPointerDown: onBodyDown, onDoubleClick: onDoubleClick,
+          // Capture phase: the browser fires a click after a long press too, and on a
+          // linked image that would navigate away from the card.
+          onClickCapture: function (e) { if (navGuardRef.current) { navGuardRef.current = false; e.preventDefault(); e.stopPropagation() } },
+        }, bodyKids),
         panelEl, foot,
         toast ? h('div', { className: 'dn-toast', key: 'toast' }, toast) : null,
       ])
