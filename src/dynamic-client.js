@@ -85,6 +85,18 @@ const CSS = [
 '.dn-del{text-decoration:line-through;opacity:.7;}',
 '.dn-lnk{color:#3b6fe0;text-decoration:underline;}',
 '.dn-img{max-width:100%;height:auto;border-radius:8px;display:block;margin:8px auto;background:rgba(0,0,0,.03);}',
+'.dn-imglink{display:block;text-decoration:none;cursor:pointer;}',
+'.dn-imglink:hover .dn-img{outline:2px solid rgba(90,150,255,.55);outline-offset:2px;}',
+// A tint behind an image is invisible: the image is opaque and covers it. An image
+// selection therefore outlines the box instead, in the overlay layer (so a selection
+// change never has to re-render the image element itself), and black — whose whole
+// point is an opaque mask — still covers it.
+'.dn-hlo[data-img="1"]{z-index:1;background:transparent;border:3px solid rgba(255,214,0,.95);box-sizing:border-box;}',
+'.dn-hlo[data-img="1"][data-color=pink]{border-color:rgba(255,138,190,.95);}',
+'.dn-hlo[data-img="1"][data-color=green]{border-color:rgba(112,214,140,.95);}',
+'.dn-hlo[data-img="1"][data-kind=live]{border-color:rgba(90,150,255,.95);border-style:dashed;}',
+'.dn-hlo[data-img="1"][data-kind=stale]{border-color:rgba(255,120,0,.85);border-style:dashed;}',
+'.dn-hlo[data-img="1"][data-color=black]{background:#000;z-index:2;border-color:#000;}',
 '.dn-img-hl{outline:3px solid rgba(255,214,0,.9);outline-offset:2px;}',
 '.dn-img-hl-live{outline:3px solid rgba(90,150,255,.95);outline-offset:2px;}',
 '.dn-imgfail{display:flex;gap:6px;align-items:center;justify-content:center;font-size:11.5px;color:var(--dsw-alias-label-tertiary,#8a8f98);border:1px dashed rgba(0,0,0,.18);border-radius:8px;padding:8px 10px;margin:8px 0;word-break:break-all;}',
@@ -160,6 +172,14 @@ const SIZES = [{ id: 'std', w: 430, label: '标准' }, { id: 'wide', w: 620, lab
 const DEFAULT_LAYOUT = { mode: 'docked', x: null, y: null, w: 430, h: null, size: 'std' }
 const HTML_TAGS = { b: 1, strong: 1, i: 1, em: 1, u: 1, s: 1, del: 1, mark: 1, kbd: 1, sub: 1, sup: 1, small: 1, code: 1, span: 1, a: 1, cite: 1, q: 1, abbr: 1, ins: 1 }
 const assetCache = {}
+// Geometry of the rendered note is cached per measured version (see cellsOf). Content
+// that changes size *after* its first paint — a Mermaid diagram finishing its render, a
+// lazily-loaded image decoding — has to invalidate that cache or the highlights and
+// handles keep the stale boxes. The card owns the version counter, so it publishes its
+// bump function here; children defined outside the component (NoteImage, MermaidBlock)
+// call it instead of reaching for a name that is not in their scope.
+const geoBump = { fn: function () { } }
+function bumpGeometry() { try { geoBump.fn() } catch (err) { } }
 // Mermaid is a declared npm dependency, served by the host half from
 // node_modules at /plugins/dsh-window/vendor/mermaid.min.js. It is loaded on
 // demand, so a note without diagrams never pays for the runtime, and a failed
@@ -352,6 +372,11 @@ function offsetOfPos(text, line, col) {
 const WORD = /[A-Za-z0-9_\u4e00-\u9fff\u3040-\u30ff\uff10-\uff5a]/
 function isLocalRef(href) { return !!href && !/^(https?:|data:|blob:|\/\/)/i.test(href) }
 function imgSrc(href) { return /^\/\//.test(href) ? 'https:' + href : href }
+/** `url "title"` -> `url`: a Markdown title must never leak into an href. */
+function hrefOnly(s) {
+  const m = /^\s*(\S+?)(?:\s+["'][^"']*["'])?\s*$/.exec(s)
+  return m ? m[1] : s
+}
 function inlineTokens(raw) {
   const out = []
   const n = raw.length
@@ -364,11 +389,19 @@ function inlineTokens(raw) {
   }
   while (i < n) {
     const ch = raw[i]
+    // `[![alt](src)](href)` — a clickable image. It has to be tested before the plain
+    // image and plain link branches: the link branch matched first and produced an
+    // anchor whose label was the literal text "![alt", so the example on line 354 of
+    // the image test block rendered as broken text with no image at all.
+    if (ch === '[' && raw[i + 1] === '!' && raw[i + 2] === '[') {
+      const m = /^\[!\[([^\]]*)\]\(\s*([^\s()]+)(?:\s+["'][^"']*["'])?\s*\)\]\(\s*([^\s()]+)(?:\s+["'][^"']*["'])?\s*\)/.exec(raw.slice(i))
+      if (m) { out.push({ k: 'img', t: m[1], href: m[2], link: m[3], off: i, len: m[0].length }); i += m[0].length; continue }
+    }
     if (ch === '!' && raw[i + 1] === '[') {
       const close = raw.indexOf(']', i + 2)
       if (close > -1 && raw[close + 1] === '(') {
         const pe = raw.indexOf(')', close + 2)
-        if (pe > -1) { out.push({ k: 'img', t: raw.slice(i + 2, close), href: raw.slice(close + 2, pe), off: i, len: pe - i + 1 }); i = pe + 1; continue }
+        if (pe > -1) { out.push({ k: 'img', t: raw.slice(i + 2, close), href: hrefOnly(raw.slice(close + 2, pe)), off: i, len: pe - i + 1 }); i = pe + 1; continue }
       }
     }
     if (ch === '<') {
@@ -401,7 +434,7 @@ function inlineTokens(raw) {
     if (ch === '~' && raw[i + 1] === '~') { const j = raw.indexOf('~~', i + 2); if (j > i + 1) { out.push({ k: 'del', t: raw.slice(i + 2, j), off: i + 2 }); i = j + 2; continue } }
     if (ch === '[') {
       const close = raw.indexOf(']', i + 1)
-      if (close > -1 && raw[close + 1] === '(') { const pe = raw.indexOf(')', close + 2); if (pe > -1) { out.push({ k: 'link', t: raw.slice(i + 1, close), href: raw.slice(close + 2, pe), off: i + 1 }); i = pe + 1; continue } }
+      if (close > -1 && raw[close + 1] === '(') { const pe = raw.indexOf(')', close + 2); if (pe > -1) { out.push({ k: 'link', t: raw.slice(i + 1, close), href: hrefOnly(raw.slice(close + 2, pe)), off: i + 1 }); i = pe + 1; continue } }
     }
     let j = i + 1
     while (j < n && '`*_~[<!'.indexOf(raw[j]) === -1) j++
@@ -499,7 +532,15 @@ return {
       }, [props.href])
       if (failed) return h('span', { className: 'dn-imgfail' }, ['\ud83d\uddbc 图片无法读取：' + String(props.href || '')])
       if (state === 'ok' && (dataUrl || !isLocalRef(props.href))) {
-        return h('img', { className: props.cls, src: dataUrl || imgSrc(props.href), alt: props.alt || '', 'data-soff': props.soff, 'data-img-len': props.len, loading: 'lazy', onError: function () { setFailed(true) } })
+        return h('img', {
+          className: props.cls, src: dataUrl || imgSrc(props.href), alt: props.alt || '',
+          'data-soff': props.soff, 'data-img-len': props.len, loading: 'lazy', decoding: 'async',
+          // A lazy image is 0x0 until it decodes, so everything below it sits higher than
+          // it will afterwards. Re-measure once the real box exists, otherwise a highlight
+          // made while the image was unloaded keeps the wrong y and the handles drift.
+          onLoad: function () { bumpGeometry() },
+          onError: function () { setFailed(true); bumpGeometry() },
+        })
       }
       return h('span', { className: 'dn-imgfail', 'data-soff': props.soff, 'data-img-len': props.len }, ['\ud83d\uddbc 读取中… ' + String(props.href || '')])
     }
@@ -522,8 +563,10 @@ return {
             setMmdSvg(out.svg)
             // The diagram's real height only exists now, so drop the cached geometry
             // and re-measure — otherwise a block selection (and the overlay drawn from
-            // it) keeps the pre-render size.
-            try { bump() } catch (err) { }
+            // it) keeps the pre-render size. (This used to call a `bump` that is scoped
+            // to the card component, not here, so it threw and was swallowed by the
+            // catch below: the re-measure only ever happened via the ResizeObserver.)
+            bumpGeometry()
           }
         }).catch(function (err) {
           // Surface the reason. Silently falling back to the built-in renderer is
@@ -645,6 +688,8 @@ return {
       }
       function selCount() { return st && st.selections ? st.selections.length : 0 }
       function bump() { setGeoVer(function (v) { return v + 1 }) }
+      // Publish the version bump for the out-of-component children (images, Mermaid).
+      geoBump.fn = bump
       // Declared before its first use: a useEffect dependency array is evaluated
       // during render, so resolving it after the hooks that read it threw
       // "Cannot access 'geo' before initialization" and crashed the whole card.
@@ -926,8 +971,8 @@ return {
             const c = cells[i]
             if (c.off + c.len <= r.from || c.off >= r.to) continue
             const row = Math.round(c.top)
-            if (run && run.row === row && c.left - run.right <= 3) { run.right = Math.max(run.right, c.right); run.bottom = Math.max(run.bottom, c.bottom) }
-            else { if (run) out.push(run); run = { row: row, kind: r.kind, color: r.color, left: c.left, right: c.right, top: c.top, bottom: c.bottom } }
+            if (run && run.row === row && c.left - run.right <= 3) { run.right = Math.max(run.right, c.right); run.bottom = Math.max(run.bottom, c.bottom); if (c.img) run.img = true }
+            else { if (run) out.push(run); run = { row: row, kind: r.kind, color: r.color, left: c.left, right: c.right, top: c.top, bottom: c.bottom, img: c.img ? true : undefined } }
           }
           if (run) out.push(run)
         }
@@ -936,6 +981,15 @@ return {
       function wordRange(pt) {
         const ls = String(textRef.current).split('\n')
         const rawLine = ls[pt.line - 1] || ''
+        // An image is a selection unit of its own: its Markdown source `![alt](src)`.
+        // The syntax around it is not a "word", so without this a long press on an image
+        // collapsed to a zero-width range (both endpoints on the same column) and 选中
+        // answered "没有选中文字" even though the highlight and handles looked right.
+        const cells = cellsOf(pt.line).cells
+        for (let i = 0; i < cells.length; i++) {
+          const c = cells[i]
+          if (c.img && pt.col >= c.off && pt.col <= c.off + c.len) return { from: c.off, to: c.off + c.len }
+        }
         let a = Math.min(pt.col, rawLine.length)
         if (a >= rawLine.length || !WORD.test(rawLine.charAt(a))) return { from: a, to: a }
         let b = a
@@ -964,6 +1018,12 @@ return {
       }
       function liveText() {
         if (!live) return ''
+        // Same reason as commitLive: a block selection has no useful a/f columns, so
+        // copying has to take the block's source lines.
+        if (live.block) {
+          const rg = blockRangeAt(live.a.line)
+          if (rg) return String(textRef.current).split(String.fromCharCode(10)).slice(rg.from - 1, rg.to).join(String.fromCharCode(10))
+        }
         const first = cmpPos(live.a, live.f) <= 0 ? live.a : live.f
         const last = cmpPos(live.a, live.f) <= 0 ? live.f : live.a
         const ls = String(textRef.current).split('\n')
@@ -977,13 +1037,25 @@ return {
         if (!live) return
         const first = cmpPos(live.a, live.f) <= 0 ? live.a : live.f
         const last = cmpPos(live.a, live.f) <= 0 ? live.f : live.a
-        if (first.line === last.line && first.col === last.col) { notify('没有选中文字：可拖动圆点确定范围'); return }
-        host.call('addSelection', { startLine: first.line, startCol: first.col, endLine: last.line, endCol: last.col, color: penColor }).then(function (r) {
+        // A block selection stores both endpoints as {line, col: 0} on purpose (columns
+        // are meaningless for a diagram/image), so this guard must not fire for it —
+        // doing so was what produced "没有选中文字" on a long-pressed Mermaid block.
+        if (!live.block && first.line === last.line && first.col === last.col) { notify('没有选中文字：可拖动圆点确定范围'); return }
+        // A block selection carries no meaningful a/f columns (both sit on the fence
+        // line), so committing it through line/column produced an empty slice and the
+        // host answered "empty" ("没有选中文字"). Submit the block's whole source range
+        // instead — fences included, so the diagram's source is what gets stored.
+        const blkRange = live && live.block ? blockRangeAt(live.a.line) : null
+        const blkLines = blkRange ? String(textRef.current).split(String.fromCharCode(10)) : null
+        const rangeArgs = blkRange
+          ? { startLine: blkRange.from, startCol: 0, endLine: blkRange.to, endCol: (blkLines[blkRange.to - 1] || '').length }
+          : { startLine: first.line, startCol: first.col, endLine: last.line, endCol: last.col }
+        host.call('addSelection', Object.assign({ color: penColor }, rangeArgs)).then(function (r) {
           if (r && r.ok) {
             revRef.current = r.revision
             setSt(function (prev) { return prev ? Object.assign({}, prev, { revision: r.revision, selections: r.selections }) : prev })
             setLive(null)
-            notify('已选中 第' + first.line + '~' + last.line + ' 行')
+            notify('已选中 第' + (blkRange ? blkRange.from : first.line) + '~' + (blkRange ? blkRange.to : last.line) + ' 行')
           } else notify(r && r.reason === 'empty' ? '选中的是空白内容' : '选中失败')
         }).catch(function (err) { notify('选中失败: ' + err.message) })
       }
@@ -1251,7 +1323,7 @@ return {
         for (let i = 0; i < blocks.length; i++) {
           const b = blocks[i]
           let to = b.line
-          if (b.k === 'code' && b.endLine) to = b.endLine
+          if (b.k === 'code') to = b.endLine ? b.endLine : (b.line + (b.body ? b.body.length : 0) + 1)
           if (b.k === 'table' && b.rows && b.rows.length) to = b.rows[b.rows.length - 1].line
           if (line >= b.line && line <= to) return { from: b.line, to: to, kind: b.k }
         }
@@ -1361,7 +1433,11 @@ return {
         for (let i = 0; i < toks.length; i++) {
           const tk = toks[i]
           if (tk.k === 'img') {
-            out.push(h(NoteImage, { key: keyPrefix + 'img' + i, href: tk.href, alt: tk.t, soff: tk.base + tk.off, len: tk.len || (tk.t ? tk.t.length : 0), cls: 'dn-img' }))
+            const img = h(NoteImage, { key: keyPrefix + 'img' + i, href: tk.href, alt: tk.t, soff: tk.base + tk.off, len: tk.len || (tk.t ? tk.t.length : 0), cls: 'dn-img' })
+            // A linked image keeps its click-through. The anchor is a bare wrapper: the
+            // data-soff/data-img-len stay on the <img> so the geometry cache sees one
+            // cell for the image rather than two for the same box.
+            out.push(tk.link ? h('a', { className: 'dn-imglink', key: keyPrefix + 'imgl' + i, href: tk.link, target: '_blank', rel: 'noreferrer', title: tk.link }, [img]) : img)
             continue
           }
           if (tk.k === 'br') { out.push(h('br', { key: keyPrefix + 'br' + i })); continue }
@@ -1533,7 +1609,7 @@ return {
               lo = Math.max(lo, clipBox.left)
               hi = Math.min(hi, clipBox.right)
             }
-            bodyKids.push(h('div', { className: 'dn-hlo', 'data-kind': r.kind, 'data-color': r.color || 'yellow', key: 'o' + ln + '_' + k, style: { left: lo + 'px', top: r.top + 'px', width: Math.max(1, hi - lo) + 'px', height: Math.max(2, r.bottom - r.top) + 'px' } }))
+            bodyKids.push(h('div', { className: 'dn-hlo', 'data-kind': r.kind, 'data-color': r.color || 'yellow', 'data-img': r.img ? '1' : undefined, key: 'o' + ln + '_' + k, style: { left: lo + 'px', top: r.top + 'px', width: Math.max(1, hi - lo) + 'px', height: Math.max(2, r.bottom - r.top) + 'px' } }))
           }
         }
       }
@@ -1626,11 +1702,22 @@ return {
         const anchor = anchorPt || p1 || p2
         if (anchor && barReady) {
           const barHost = bodyRef.current
+          const BAR_H = 36
           const belowY = anchor.y + (anchor.h || 18) + 6
           const aboveY = Math.max(4, anchor.y - 42)
-          const visibleBelow = barHost ? belowY - barHost.scrollTop + 42 : 0
+          const visibleBelow = barHost ? belowY - barHost.scrollTop + BAR_H : 0
           const fitsBelow = !barHost || visibleBelow < barHost.clientHeight
-          const barTop = anchorUp ? aboveY : (fitsBelow ? belowY : aboveY)
+          const aboveVisible = !barHost || aboveY >= barHost.scrollTop + 2
+          let barTop = anchorUp ? (aboveVisible ? aboveY : belowY) : (fitsBelow ? belowY : aboveY)
+          // Above/below the caret is not enough when neither side is inside the scrolled
+          // window — a block taller than the card (a long Mermaid diagram, a big table).
+          // The bar then landed past the body's bottom edge, overflow clipped it, and its
+          // buttons were unclickable, so 选中 could never be pressed. Clamp it into view.
+          if (barHost) {
+            const minTop = barHost.scrollTop + 2
+            const maxTop = barHost.scrollTop + barHost.clientHeight - BAR_H - 6
+            barTop = Math.min(Math.max(barTop, minTop), Math.max(minTop, maxTop))
+          }
           bodyKids.push(h('div', { className: 'dn-bar', key: 'bar', style: { left: Math.max(4, anchor.x - 10) + 'px', top: barTop + 'px', pointerEvents: ovPe } }, [
             h('span', { className: 'dn-pen', key: 'pen' }, [
               h('button', { className: 'dn-pen-sw', key: 'cur', 'data-c': penColor, 'data-on': 'true', title: '本次高亮颜色（默认黄）', onClick: function (e) { e.stopPropagation(); setPenOpen(!penOpen) } }),
