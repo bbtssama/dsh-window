@@ -199,17 +199,70 @@ return {
     const S = { text: '', selections: [], seq: 0, revision: 1, savedAt: null, commitHash: '', committedAt: null, gitReady: false, gitTrace: '', error: '', fileExists: false, touched: false, stateVersion: STATE_VERSION }
     function fail(where, err) { S.error = where + ': ' + (err && err.message ? err.message : String(err)); console.error(S.error) }
     function markTouched() { if (S.touched) return; S.touched = true; S.revision += 1 }
-    async function readIfExists(path) {
+    // ── durability ────────────────────────────────────────────────────────────
+    // Two guarantees ported from AgentTeams, adapted to the `fs` service.
+    //
+    // 1. Serialization. AgentTeams wraps every mutation in withTeamLock(key, fn), an
+    //    in-process FIFO promise chain, because its mutations are read-modify-write
+    //    sequences. Ours are too (load state, change it, write both files), and nothing
+    //    serialized them: two browser tabs, or a note_* tool call racing the card's
+    //    save, could interleave and silently lose one side's change — the selection
+    //    mutations had no revision guard at all.
+    const locks = new Map()
+    function withNoteLock(key, fn) {
+      const previous = locks.get(key) || Promise.resolve()
+      let release = null
+      const gate = new Promise(function (resolve) { release = resolve })
+      locks.set(key, previous.then(function () { return gate }))
+      return previous.then(function () { return fn() }).finally(function () {
+        release()
+        if (locks.get(key) === gate) locks.delete(key)
+      })
+    }
+    // 2. Version guard. AgentTeams hand-rolls temp-file + rename (atomicWriteText) and
+    //    has no compare-and-swap. The `fs` service already publishes writes atomically
+    //    (staging dir, fsync, rename/ReplaceFile with DACL preservation), so porting
+    //    that by hand would only duplicate it — and bypass the sandbox policy, since
+    //    AgentTeams writes through node:fs directly. What was genuinely missing is the
+    //    version guard: we compared our own in-memory counter, which cannot see an
+    //    external edit. The service offers `expected: { kind: 'replaceIfVersion' }`,
+    //    which throws FS_STALE_VERSION if the file changed since we read it.
+    const diskVersions = new Map()
+    function isStaleVersion(err) {
+      return !!err && (err.code === 'FS_STALE_VERSION' || /changed since it was read/.test(String(err.message || '')))
+    }
+    // The version we compare against must be the version of the text we actually hold
+    // as our basis — i.e. what load() read into S.text, or what we last wrote. An
+    // incidental read must NOT move it: `adoptFromHint` probes whether this session's
+    // workspace owns a note on every RPC (including the card's 2-second poll), and if
+    // that probe recorded a version, the guard would compare against a file we never
+    // loaded and silently accept overwriting someone else's edit.
+    async function readIfExists(path, opts) {
       if (fs === undefined) throw new Error('fs 服务不可用')
       const info = await fs.lstat(path)
-      if (info === undefined) return null
+      const track = !!(opts && opts.track)
+      if (info === undefined) { if (track) diskVersions.delete(path); return null }
+      if (track) {
+        if (info.version !== undefined) diskVersions.set(path, info.version)
+        else diskVersions.delete(path)
+      }
       const target = await fs.resolve(path)
       return await fs.readText(target)
+    }
+    /** Existence probe that deliberately touches no version state. */
+    async function existsAt(path) {
+      if (fs === undefined) return false
+      try { return (await fs.lstat(path)) !== undefined } catch (err) { return false }
     }
     async function writeAt(path, content) {
       if (fs === undefined) throw new Error('fs 服务不可用')
       const target = await fs.resolve(path, policyCache !== null ? { cwd: policyCache.workspaceRoot } : undefined)
-      await fs.writeText(target, content, undefined, undefined, policyCache !== null ? policyCache : undefined)
+      const known = diskVersions.get(path)
+      const expected = known === undefined ? undefined : { kind: 'replaceIfVersion', version: known }
+      const res = await fs.writeText(target, content, expected, undefined, policyCache !== null ? policyCache : undefined)
+      if (res && res.version !== undefined) diskVersions.set(path, res.version)
+      else diskVersions.delete(path)
+      return res
     }
     function canWrite() { return confirmed && policyCache !== null }
     async function runGit(args) {
@@ -287,8 +340,10 @@ return {
       if (!ses) return false
       const cwd = cwdOfSession(ses)
       if (!cwd) return false
-      let owns = false
-      try { const raw = await readIfExists(cwd.replace(/[\\/]+$/, '') + '/' + NOTE_DIR + '/' + NOTE_FILE); owns = raw !== null } catch (err) { owns = false }
+      // Existence only. Reading the whole note here ran on every RPC (the card polls
+      // every 2 seconds) and, once versions were tracked, it also poisoned the guard by
+      // re-pointing our basis at a file we never loaded.
+      const owns = await existsAt(cwd.replace(/[\\/]+$/, '') + '/' + NOTE_DIR + '/' + NOTE_FILE)
       if (!owns) return false
       return adoptFrom(ses, false)
     }
@@ -298,13 +353,13 @@ return {
       loadedBase = base
       const p = paths()
       try {
-        const raw = await readIfExists(p.note)
+        const raw = await readIfExists(p.note, { track: true })
         if (raw === null) { S.text = SEED_TEXT; S.fileExists = false }
         else { S.text = String(raw).replace(/\r\n?/g, '\n'); S.fileExists = true }
         S.savedAt = isoNow()
       } catch (err) { fail('读取笔记', err) }
       try {
-        const rawState = await readIfExists(p.state)
+        const rawState = await readIfExists(p.state, { track: true })
         if (rawState !== null) {
           let parsed = null
           let ok = true
@@ -349,7 +404,9 @@ return {
       S.commitHash = ''
       S.committedAt = null
       try {
-        const raw = await readIfExists(paths().note)
+        // migrate() re-reads the note as this store's new basis, so the version it
+        // records is the one the guard must compare against afterwards.
+        const raw = await readIfExists(paths().note, { track: true })
         if (raw === null) {
           if (prevText) { await writeAt(paths().note, prevText); S.fileExists = true }
           else { S.text = SEED_TEXT; S.fileExists = false }
@@ -434,14 +491,27 @@ return {
       const next = String(nextRaw === null || nextRaw === undefined ? '' : nextRaw).replace(/\r\n?/g, '\n')
       const prev = S.text
       if (next !== prev) {
-        S.selections = remapSelections(S.selections, prev, next)
-        S.text = next
-        S.revision += 1
+        const remapped = remapSelections(S.selections, prev, next)
         if (canWrite()) {
-          try { await writeAt(paths().note, next); S.fileExists = true; S.savedAt = isoNow() }
-          catch (err) { fail('写入笔记', err); return { ok: false, error: S.error, revision: S.revision, selections: viewSelections() } }
+          try { await writeAt(paths().note, next); }
+          catch (err) {
+            // FS_STALE_VERSION: the file changed on disk since we read it — an external
+            // editor, another dsh process, or a second card. Report it as the conflict the
+            // client already knows how to resolve (prompting a reload) instead of
+            // overwriting it, and leave the in-memory text alone so a reload is truthful.
+            if (isStaleVersion(err)) { fail('写入笔记', err); return { ok: false, conflict: true, stale: true, revision: S.revision, selections: viewSelections() } }
+            fail('写入笔记', err); return { ok: false, error: S.error, revision: S.revision, selections: viewSelections() }
+          }
+          S.fileExists = true; S.savedAt = isoNow()
+          S.selections = remapped
+          S.text = next
+          S.revision += 1
           try { await persistState() } catch (err) { fail('写入选中记录', err) }
           if (!S.gitReady) await ensureGit()
+        } else {
+          S.selections = remapped
+          S.text = next
+          S.revision += 1
         }
       }
       return { ok: true, revision: S.revision, savedAt: S.savedAt, lineCount: linesOf(S.text).length, selections: viewSelections() }
@@ -543,6 +613,7 @@ return {
       parameters: {},
       output: { schema: { type: 'array', items: SEL_ITEM }, render: function (a, v) { return [{ type: 'text', text: v.length ? ('用户新选中了 ' + v.length + ' 段:\n\n' + selRender(v)) : '(没有新的选中内容)' }] } },
       async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_take_new_selections', exec)
         markTouched()
         const freshIds = {}
@@ -555,6 +626,7 @@ return {
           try { await persistState() } catch (err) { fail('写入选中记录', err) }
         }
         return view.filter(function (s) { return freshIds[s.id] === true })
+        })
       },
     }))
     harness.registerTool(ctx, harness.defineTool({
@@ -620,6 +692,7 @@ return {
         render: function (a, v) { return [{ type: 'text', text: '已写入 ' + v.path + ' (现在共 ' + v.lineCount + ' 行)' + (v.committed ? '; git: ' + v.commit : '; 未提交 ' + v.commit) }] },
       },
       async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_write', exec)
         markTouched()
         const content = String(args && args.content !== undefined ? args.content : '')
@@ -641,6 +714,7 @@ return {
           } else info = 'skipped'
         } else info = (r && r.error) || 'write failed'
         return { path: paths().note, lineCount: linesOf(S.text).length, revision: S.revision, committed: committed, commit: info }
+        })
       },
     }))
     harness.registerTool(ctx, harness.defineTool({
@@ -652,12 +726,14 @@ return {
         render: function (a, v) { return [{ type: 'text', text: v.ok ? ('git 提交: ' + v.hash + ' ' + v.message) : ('提交失败: ' + v.message) }] },
       },
       async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
         // This one called adoptFromExec but never ensureLoaded, so committing before
         // any other note call ran against an unloaded store.
         await enterFromTool('note_commit', exec)
         markTouched()
         const r = await commit(args && args.message ? args.message : '')
         return { ok: r.ok === true, hash: r.hash || '', message: r.ok ? (r.nothing ? '没有需要提交的改动' : String(r.message || '')) : String(r.error || '未知错误') }
+        })
       },
     }))
     harness.handle('state', async function (args) {
@@ -672,41 +748,51 @@ return {
     // without this, a poll from an unrelated session could mutate the store of
     // whoever owns it. Reads stay available (state answers `inactive`).
     function notMine(where) { return { ok: false, error: 'inactive', where: where } }
+    /** Serialize every mutation of this note (see withNoteLock) under one key. */
+    function noteLockKey() { return 'note:' + base }
     harness.handle('saveText', async function (args) {
       const a = args || {}
       const moved = await adoptFromHint(a.sessionId)
       if (moved) { await ensureLoaded(); await migrate() }
       if (!confirmed) return notMine('saveText')
-      return await saveText(a.text, typeof a.baseRevision === 'number' ? a.baseRevision : undefined)
+      return await withNoteLock(noteLockKey(), function () {
+        return saveText(a.text, typeof a.baseRevision === 'number' ? a.baseRevision : undefined)
+      })
     })
     harness.handle('addSelection', async function (args) {
       const a = args || {}
       const moved = await adoptFromHint(a.sessionId)
       if (moved) { await ensureLoaded(); await migrate() }
       if (!confirmed) return notMine('addSelection')
-      return await addSelection(a)
+      return await withNoteLock(noteLockKey(), function () { return addSelection(a) })
     })
     harness.handle('removeSelection', async function (args) {
       await ensureLoaded()
       if (!confirmed) return notMine('removeSelection')
-      const id = args && args.id ? String(args.id) : ''
-      S.selections = S.selections.filter(function (s) { return s.id !== id })
-      S.revision += 1
-      try { await persistState() } catch (err) { fail('写入选中记录', err) }
-      return { ok: true, revision: S.revision, selections: viewSelections() }
+      return await withNoteLock(noteLockKey(), async function () {
+        const id = args && args.id ? String(args.id) : ''
+        S.selections = S.selections.filter(function (s) { return s.id !== id })
+        S.revision += 1
+        try { await persistState() } catch (err) { fail('写入选中记录', err) }
+        return { ok: true, revision: S.revision, selections: viewSelections() }
+      })
     })
     harness.handle('clearSelections', async function () {
       await ensureLoaded()
       if (!confirmed) return notMine('clearSelections')
-      S.selections = []
-      S.revision += 1
-      try { await persistState() } catch (err) { fail('写入选中记录', err) }
-      return { ok: true, revision: S.revision, selections: viewSelections() }
+      return await withNoteLock(noteLockKey(), async function () {
+        S.selections = []
+        S.revision += 1
+        try { await persistState() } catch (err) { fail('写入选中记录', err) }
+        return { ok: true, revision: S.revision, selections: viewSelections() }
+      })
     })
     harness.handle('commit', async function (args) {
       await ensureLoaded()
       if (!confirmed) return notMine('commit')
-      return await commit(args && args.message ? args.message : '')
+      return await withNoteLock(noteLockKey(), function () {
+        return commit(args && args.message ? args.message : '')
+      })
     })
     harness.handle('asset', async function (args) {
       await ensureLoaded()
@@ -724,7 +810,10 @@ return {
     harness.handle('reload', async function () {
       await ensureLoaded()
       try {
-        const raw = await readIfExists(paths().note)
+        // Reload replaces our basis with what is on disk, so this is exactly the read
+        // that must adopt the new version — otherwise the next save would conflict
+        // forever against the version we just accepted.
+        const raw = await readIfExists(paths().note, { track: true })
         if (raw !== null) {
           const next = String(raw).replace(/\r\n?/g, '\n')
           S.fileExists = true
@@ -830,9 +919,11 @@ return {
         render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已新建划线 ' + v.id + ' (rev ' + v.revision + ')\n\n' + v.selections) : ('未新建: ' + (v.reason === 'empty' ? '该区间为空' : v.reason)) }] },
       },
       async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_add_selection', exec); markTouched()
         const r = await addSelection(Object.assign({}, args || {}, { color: colorOf((args || {}).color) }))
         return { ok: r.ok === true, id: r.ok ? r.id : '', revision: S.revision, reason: r.ok ? '' : String(r.reason || ''), selections: selRender(viewSelections()) }
+        })
       },
     }))
     harness.registerTool(ctx, harness.defineTool({
@@ -844,6 +935,7 @@ return {
         render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.removed ? '已删除 ' + a.id : '未找到 ' + a.id) : '失败') + ' (rev ' + v.revision + ')\n\n' + v.selections }] },
       },
       async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_remove_selection', exec); markTouched()
         const id = String((args || {}).id || '')
         const before = S.selections.length
@@ -851,6 +943,7 @@ return {
         const removed = S.selections.length !== before
         if (removed) { S.revision += 1; if (canWrite()) { try { await persistState() } catch (err) { fail('写入选中记录', err) } } }
         return { ok: true, removed: removed, revision: S.revision, selections: selRender(viewSelections()) }
+        })
       },
     }))
     harness.registerTool(ctx, harness.defineTool({
@@ -862,11 +955,13 @@ return {
         render: function (a, v) { return [{ type: 'text', text: '已清空 ' + v.cleared + ' 条划线' }] },
       },
       async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_clear_selections', exec); markTouched()
         const n = S.selections.length
         S.selections = []
         if (n > 0) { S.revision += 1; if (canWrite()) { try { await persistState() } catch (err) { fail('写入选中记录', err) } } }
         return { ok: true, cleared: n, revision: S.revision }
+        })
       },
     }))
     harness.registerTool(ctx, harness.defineTool({
@@ -878,6 +973,7 @@ return {
         render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.found ? ('已把 ' + a.id + ' 改为 ' + v.color) : ('未找到 ' + a.id)) : '失败') + ' (rev ' + v.revision + ')\n\n' + v.selections }] },
       },
       async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_set_color', exec); markTouched()
         const a = args || {}
         const c = colorOf(a.color)
@@ -885,6 +981,7 @@ return {
         for (let i = 0; i < S.selections.length; i++) if (S.selections[i].id === String(a.id || '')) { if (S.selections[i].color !== c) { S.selections[i].color = c; found = true } }
         if (found) { S.revision += 1; if (canWrite()) { try { await persistState() } catch (err) { fail('写入选中记录', err) } } }
         return { ok: true, found: found, color: c, revision: S.revision, selections: selRender(viewSelections()) }
+        })
       },
     }))
     harness.registerTool(ctx, harness.defineTool({
@@ -896,9 +993,11 @@ return {
         render: function (a, v) { return [{ type: 'text', text: v.ok ? (v.nothing ? '没有需要提交的改动' : ('已提交 ' + v.hash)) : ('失败: ' + v.error) }] },
       },
       async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_checkpoint', exec); markTouched()
         const r = await commit((args || {}).message)
         return { ok: r.ok === true, hash: r.hash || '', nothing: r.nothing === true, error: r.ok ? '' : String(r.error || '') }
+        })
       },
     }))
     harness.registerTool(ctx, harness.defineTool({
@@ -907,11 +1006,13 @@ return {
       parameters: { startLine: RANGE_PARAMS.startLine, startCol: RANGE_PARAMS.startCol, endLine: RANGE_PARAMS.endLine, endCol: RANGE_PARAMS.endCol, text: { type: 'string', description: '替换文本；空串表示删除该区间。' } },
       output: { schema: PATCH_SCHEMA, render: patchRender },
       async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_patch', exec); markTouched()
         const r = applyPatch(args || {})
         if (!r.changed) return { ok: true, changed: false, removed: 0, inserted: 0, revision: S.revision, lineCount: linesOf(S.text).length, selections: selRender(viewSelections()), error: '' }
         const wrote = await flushAfterWrite()
         return { ok: wrote, changed: true, removed: r.removed, inserted: r.inserted, revision: S.revision, lineCount: linesOf(S.text).length, selections: selRender(viewSelections()), error: wrote ? '' : S.error }
+        })
       },
     }))
     harness.registerTool(ctx, harness.defineTool({
@@ -928,6 +1029,7 @@ return {
         render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已应用 ' + v.applied + ' 处改写: -' + v.removed + ' +' + v.inserted + ' 字符，现 ' + v.lineCount + ' 行 (rev ' + v.revision + ')\n\n' + v.selections) : ('失败: ' + v.error) }] },
       },
       async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_patch_many', exec); markTouched()
         const list = ((args || {}).edits || []).slice()
         const withIdx = list.map(function (e) { return { e: e, at: indexOfPos(S.text, Math.max(1, intOr(e.startLine, 1)), Math.max(0, intOr(e.startCol, 0))) } })
@@ -940,6 +1042,7 @@ return {
         }
         const wrote = changed ? await flushAfterWrite() : true
         return { ok: wrote, applied: applied, changed: changed, removed: removed, inserted: inserted, revision: S.revision, lineCount: linesOf(S.text).length, selections: selRender(viewSelections()), error: wrote ? '' : S.error }
+        })
       },
     }))
     harness.registerTool(ctx, harness.defineTool({

@@ -152,6 +152,18 @@ ok('every note tool resolves its workspace explicitly and loudly',
   (hostSource.match(/await enterFromTool\('note_/g) || []).length === 14,
   String((hostSource.match(/await enterFromTool\('note_/g) || []).length) + ' guarded tool entry points')
 
+// Durability: mutations are serialized (AgentTeams' withTeamLock) and every write
+// carries a version guard, so an external edit is detected rather than overwritten.
+ok('mutations are serialized through one note lock',
+  /function withNoteLock\(/.test(hostCode) && (hostCode.match(/withNoteLock\(noteLockKey\(\)/g) || []).length >= 15,
+  String((hostCode.match(/withNoteLock\(noteLockKey\(\)/g) || []).length) + ' locked entry points')
+ok('writes carry a compare-and-swap version guard',
+  /replaceIfVersion/.test(hostCode) && /FS_STALE_VERSION/.test(hostCode),
+  'replaceIfVersion + FS_STALE_VERSION present')
+ok('an incidental probe cannot move the write basis',
+  /async function existsAt\(/.test(hostCode) && /readIfExists\(path, opts\)/.test(hostCode),
+  'existsAt() + track-only readIfExists present')
+
 // ───────────────────────────────────────────────────────── client half ──
 console.log('client half')
 
