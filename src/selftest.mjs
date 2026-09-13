@@ -51,12 +51,19 @@ let webServerUp = false
 let systemPromptUp = false
 // Faithful to Cordis: an injected service is readable as ctx.<name>, which is
 // what `export const inject = ['tools']` buys the host half.
+const SELFTEST_SID = 'session-selftest-0001'
+const SELFTEST_WS = 'C:/WS/selftest'
+
 const hostCtx = {
   tools: toolsService,
   get(name) {
     if (name === 'tools') return toolsService
     if (name === 'webServer' && webServerUp) return webServerService
     if (name === 'systemPrompt' && systemPromptUp) return systemPromptService
+    // A minimal session + policy pair, so the state contract can be checked for a real
+    // session: the session id is the note-space path segment and must resolve.
+    if (name === 'sessions') return { get: (id) => (id === SELFTEST_SID ? { header: { id, cwd: SELFTEST_WS } } : null) }
+    if (name === 'sandboxPolicy') return { workspaceRoot: SELFTEST_WS, resolve: () => ({ workspaceRoot: SELFTEST_WS }) }
     return undefined
   },
   effect(fn) { try { return fn() } catch (err) { return undefined } },
@@ -81,7 +88,7 @@ for (const listener of serviceListeners) listener.fn('webServer')
 ok('re-firing the service event does not double-register', registeredRoutes.length === 3 && registeredSections.length === 1, registeredRoutes.length + '/' + registeredSections.length)
 
 const toolNames = registeredTools.map((tool) => tool.name).sort()
-const expectedTools = ['note_commit', 'note_get_selections', 'note_read', 'note_take_new_selections', 'note_write']
+const expectedTools = ['note_commit', 'note_get_selections', 'note_read', 'note_take_new_selections', 'note_write', 'note_list', 'note_create', 'note_open', 'note_clear', 'note_delete', 'note_rename', 'note_import', 'note_export']
 ok('registers the note_* tools', expectedTools.every((name) => toolNames.includes(name)), toolNames.join(','))
 console.log('  tools : ' + toolNames.join(', '))
 ok('every tool has a JSON Schema + render', registeredTools.every((tool) => tool.parameters && tool.output && tool.output.schema && typeof tool.output.render === 'function'))
@@ -121,24 +128,24 @@ ok('rejects a non-POST request with 405', notPost.status === 405, String(notPost
 const unknown = await rpc('no_such_method', {})
 ok('answers an unknown method with 404 + ok:false', unknown.status === 404 && unknown.parsed && unknown.parsed.ok === false, unknown.raw.slice(0, 90))
 
-const stateCall = await rpc('state', { revision: -1, sessionId: '' })
+const stateCall = await rpc('state', { revision: -1, sessionId: SELFTEST_SID })
 ok('dispatches a real method and returns { ok, result }', stateCall.status === 200 && stateCall.parsed && stateCall.parsed.ok === true && typeof stateCall.parsed.result === 'object', stateCall.raw.slice(0, 120))
 const view = stateCall.parsed && stateCall.parsed.result
-ok('state view carries the note contract', view && 'text' in view && Array.isArray(view.selections) && 'revision' in view && 'relPath' in view, view && Object.keys(view).slice(0, 6).join(','))
+ok('state view carries the note contract', view && 'text' in view && Array.isArray(view.selections) && 'revision' in view && 'notes' in view && 'active' in view, view && Object.keys(view).slice(0, 8).join(','))
+ok('state view reports the session note space', view && typeof view.notesDir === 'string' && view.notesDir.indexOf(SELFTEST_SID) > 0, JSON.stringify(view && view.notesDir))
 
-// A session that never took part (no tool call, no sessionId in the RPC) must not be
-// able to learn anything about the note. Regression guard for accidental activation.
+// A caller that names no session cannot be served: the session id IS the note-space
+// path now, so there is nothing to resolve. Regression guard for accidental activation.
 const idleCall = await rpc('state', { revision: -1, sessionId: '' })
 const idleView = idleCall.parsed && idleCall.parsed.result
-ok('a non-participating session is told nothing about the note',
-  idleView && idleView.inactive === true && idleView.text === '' && idleView.sessionId === '' && idleView.path === '' && idleView.selections.length === 0,
-  idleView && JSON.stringify({ inactive: idleView.inactive, text: idleView.text.length, sid: idleView.sessionId, path: idleView.path }))
-ok('a non-participating session cannot mutate the store',
+ok('a caller without a session id is refused, not guessed',
+  idleView && idleView.ok === false && idleView.error === 'no-session',
+  JSON.stringify(idleView && { ok: idleView.ok, error: idleView.error }))
+ok('a caller without a session id cannot mutate anything',
   (await rpc('saveText', { text: 'x', sessionId: '' })).parsed.result.ok === false &&
   (await rpc('addSelection', { sessionId: '' })).parsed.result.ok === false &&
-  (await rpc('clearSelections', { sessionId: '' })).parsed.result.ok === false &&
-  (await rpc('clearSelections', { sessionId: '' })).parsed.result.error === 'inactive',
-  'write RPCs answered ok:false/inactive')
+  (await rpc('createNote', { name: 'x', sessionId: '' })).parsed.result.ok === false,
+  'write RPCs answered ok:false')
 
 // The implicit adoption path must be gone: "exactly one live agent" used to be enough
 // to claim a session, which is what made the card appear in unrelated sessions.
@@ -149,7 +156,7 @@ ok('no implicit session adoption remains',
   !/\bownFromAgents\b/.test(hostCode) && !/\bcurrentInitiator\b/.test(hostCode) && !/\bcandidateFromLiveAgents\b/.test(hostCode),
   'ownFromAgents/currentInitiator/candidateFromLiveAgents absent from the host code')
 ok('every note tool resolves its workspace explicitly and loudly',
-  (hostSource.match(/await enterFromTool\('note_/g) || []).length === 14,
+  (hostSource.match(/await enterFromTool\('note_/g) || []).length === 22,
   String((hostSource.match(/await enterFromTool\('note_/g) || []).length) + ' guarded tool entry points')
 
 // Durability: mutations are serialized (AgentTeams' withTeamLock) and every write

@@ -24,9 +24,12 @@ const ok = (label, cond, detail) => {
 
 const k = (p) => String(p).replace(/\\/g, '/')
 const ROOT = 'C:/WS/dur'
-const NOTE = ROOT + '/dsh-note/note.md'
-const STATE = ROOT + '/dsh-note/.note-state.json'
+const LEGACY = ROOT + '/dsh-note/note.md'
+const LEGACY_STATE = ROOT + '/dsh-note/.note-state.json'
 const SID = 'sess-dur'
+// After the one-shot migration the session's note lives here.
+const NOTE = ROOT + '/dsh-window/note/' + SID + '/note/note.md'
+const STATE = ROOT + '/dsh-window/note/' + SID + '/note/.note-state.json'
 
 // The fake fs mirrors the real contract that matters here: lstat returns a version,
 // writeText honours expected.replaceIfVersion, and both are serialized per target.
@@ -51,6 +54,21 @@ const fs = {
   async resolve(p) { return k(p) },
   async readText(p) { if (!files.has(k(p))) throw new Error('ENOENT ' + p); return files.get(k(p)) },
   async readBytes(p) { if (!files.has(k(p))) throw new Error('ENOENT ' + p); return Buffer.from(files.get(k(p))) },
+  async listDir(target) {
+    const key = k(target)
+    const prefix = key.replace(/\/$/, '') + '/'
+    const seen = new Map()
+    for (const f of files.keys()) {
+      if (!f.startsWith(prefix)) continue
+      const rest = f.slice(prefix.length)
+      const seg = rest.split('/')[0]
+      if (seg && !seen.has(seg)) seen.set(seg, rest.indexOf('/') < 0 ? 'file' : 'directory')
+    }
+    if (seen.size === 0 && ![...files.keys()].some((f) => f.startsWith(prefix))) {
+      const e = new Error('ENOENT ' + target); e.code = 'FS_NOT_FOUND'; throw e
+    }
+    return [...seen.entries()].map(([name, type]) => ({ name, type }))
+  },
   async writeText(target, content, expected) {
     const key = k(target)
     return withTargetLock(key, async () => {
@@ -93,7 +111,7 @@ const ctx = {
 }
 ctx.tools = { register(t) { tools.set(t.name, t) } }
 
-files.set(NOTE, 'original line\n')
+files.set(LEGACY, 'original line\n')
 bumpVersion(NOTE)
 
 host.apply(ctx, {})

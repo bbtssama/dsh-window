@@ -23,9 +23,10 @@ const ok = (label, cond, detail) => {
 
 const k = (p) => String(p).replace(/\\/g, '/')
 const ROOT = 'C:/WS/rev'
-const NOTE = ROOT + '/dsh-note/note.md'
-const STATE = ROOT + '/dsh-note/.note-state.json'
 const SID = 'sess-owner'
+// The note lives in the per-session layout the plugin now uses.
+const NOTE = ROOT + '/dsh-window/note/' + SID + '/note/note.md'
+const STATE = ROOT + '/dsh-window/note/' + SID + '/note/.note-state.json'
 
 const files = new Map()
 const written = []
@@ -37,6 +38,18 @@ const fs = {
   async readText(p) { if (!files.has(k(p))) throw new Error('ENOENT ' + p); return files.get(k(p)) },
   async readBytes(p) { if (!files.has(k(p))) throw new Error('ENOENT ' + p); return Buffer.from(files.get(k(p))) },
   async writeText(p, c) { files.set(k(p), String(c)); written.push(k(p)) },
+  async listDir(target) {
+    const prefix = k(target).replace(/\/$/, '') + '/'
+    const seen = new Map()
+    for (const f of files.keys()) {
+      if (!f.startsWith(prefix)) continue
+      const rest = f.slice(prefix.length)
+      const seg = rest.split('/')[0]
+      if (seg && !seen.has(seg)) seen.set(seg, rest.indexOf('/') < 0 ? 'file' : 'directory')
+    }
+    if (seen.size === 0) { const e = new Error('ENOENT ' + target); e.code = 'FS_NOT_FOUND'; throw e }
+    return [...seen.entries()].map(([name, type]) => ({ name, type }))
+  },
 }
 const shell = { resolve: (r) => r, async run() { return { exitCode: 0, stdout: { text: 'true\n' }, stderr: { text: '' } } } }
 const policy = { workspaceRoot: ROOT, resolve(a) { const s = a && a.session; return { workspaceRoot: s && s.header && s.header.cwd ? s.header.cwd : ROOT } } }

@@ -59,13 +59,16 @@ const host = splitBody(readLines(hostSrc), hostSrc)
 let hostHead = host.head.join('\n')
 let hostBody = host.body.join('\n')
 
-const hostToolHits = count(hostBody, 'harness.registerTool(ctx, harness.defineTool(')
-hostBody = hostBody.replaceAll('harness.registerTool(ctx, harness.defineTool(', 'ctx.tools.register(defineTool(')
-const hostHandleHits = count(hostBody, 'harness.handle(')
+const hostToolHits = count(hostBody, 'registerToolLocked(harness.defineTool(')
+hostBody = hostBody.replaceAll('registerToolLocked(harness.defineTool(', 'registerToolLocked(defineTool(')
+const hostHandleHits = count(hostBody, "handleLocked('")
+// The two locking wrappers are the only remaining users of the dynamic-harness shim;
+// rewrite their own implementations to the permanent-plugin equivalents.
+hostBody = hostBody.replaceAll('harness.registerTool(ctx, ', 'ctx.tools.register(')
 hostBody = hostBody.replaceAll('harness.handle(', 'handle(')
-if (hostToolHits !== 14) throw new Error('host: expected 14 tool registrations, saw ' + hostToolHits)
-// state / saveText / addSelection / removeSelection / clearSelections / commit / asset / reload
-if (hostHandleHits !== 8) throw new Error('host: expected 8 rpc handlers, saw ' + hostHandleHits)
+if (hostToolHits !== 22) throw new Error('host: expected 22 tool registrations, saw ' + hostToolHits)
+// 14 note tools + 8 note management tools + 15 rpc handlers (state/saveText/…/importNote)
+if (hostHandleHits !== 15) throw new Error('host: expected 15 rpc handlers, saw ' + hostHandleHits)
 if (hostBody.includes('harness.')) throw new Error('host: a harness.* reference survived')
 
 // ── late-bound services ──

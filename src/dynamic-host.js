@@ -1,8 +1,22 @@
+// ── storage model ───────────────────────────────────────────────────────────────
+// Per session, per note:
+//   <workspace>/<ROOT_DIR>/<NOTES_DIR>/<sessionId>/<noteName>/{note.md,.note-state.json,.git}
+// Session isolation is the PATH, not a permission check: another session's note is not
+// under this session's subtree at all. Each note owns its own git repository, which is
+// what makes "clear keeps history" and "delete removes history too" both exact.
+let ROOT_DIR = 'dsh-window'
+let NOTES_DIR = 'note'
+let DEFAULT_NOTE = 'note'
+// Legacy single-note location, kept as the one-shot migration source.
 let NOTE_DIR = 'dsh-note'
 let NOTE_FILE = 'note.md'
+const SESSION_FILE = '.session.json'
 const STATE_FILE = '.note-state.json'
 const BAD_STATE_FILE = '.note-state.bad.json'
 const STATE_VERSION = 1
+const SESSION_STATE_VERSION = 1
+const MAX_NAME_LEN = 48
+const MAX_IMPORT_BYTES = 8 * 1024 * 1024
 // Highlight colour a selection carries. Agent-visible enum; the client paints it
 // as an overlay behind the text, so overlapping ranges simply blend.
 const COLORS = { yellow: 1, pink: 1, green: 1, black: 1 }
@@ -164,6 +178,81 @@ return {
     let policyCache = null
     let sessionId = ''
     let stateCorrupt = false
+    // The note this session currently has open. Resolved from `<sessionRoot>/.session.json`;
+    // '' means "this session has no note yet".
+    let activeNote = ''
+    let sessionNotes = null
+    // ── per-session stores ───────────────────────────────────────────────────────────
+    // This plugin instance is shared by every session of the profile, so all of the state
+    // above is really per session: the bound workspace, the open note, the loaded text and
+    // selections, the on-disk versions and the initialisation promise. A closure cannot
+    // re-point its own variables, so the live values above are swapped in and out of a
+    // record while a single global lock is held for the whole operation (registerToolLocked
+    // / handleLocked below). That lock is what makes the swap safe: nothing else can swap
+    // the pointers while a body is awaiting file I/O.
+    const stores = new Map()
+    let currentStore = null
+    function freshState() {
+      return { text: '', selections: [], seq: 0, revision: 1, savedAt: null, commitHash: '', committedAt: null, gitReady: false, gitTrace: '', error: '', fileExists: false, touched: false, stateVersion: STATE_VERSION }
+    }
+    function newStore(sid) {
+      return {
+        sid: sid, base: '', baseFrom: '', confirmed: false, pathCache: null, loadedBase: '',
+        policyCache: null, sessionId: sid, stateCorrupt: false,
+        activeNote: '', sessionNotes: null,
+        S: freshState(), diskVersions: new Map(), loading: null,
+      }
+    }
+    function saveCurrent() {
+      const st = currentStore
+      if (!st) return
+      st.base = base; st.baseFrom = baseFrom; st.confirmed = confirmed
+      st.pathCache = pathCache; st.loadedBase = loadedBase; st.policyCache = policyCache
+      st.sessionId = sessionId; st.stateCorrupt = stateCorrupt
+      st.activeNote = activeNote; st.sessionNotes = sessionNotes
+      st.S = S; st.diskVersions = diskVersions; st.loading = loading
+    }
+    function activate(sid) {
+      if (currentStore && currentStore.sid === sid) { currentStore.sessionId = sessionId; return currentStore }
+      saveCurrent()
+      let st = stores.get(sid)
+      if (st === undefined) { st = newStore(sid); stores.set(sid, st) }
+      base = st.base; baseFrom = st.baseFrom; confirmed = st.confirmed
+      pathCache = st.pathCache; loadedBase = st.loadedBase; policyCache = st.policyCache
+      sessionId = st.sessionId; stateCorrupt = st.stateCorrupt
+      activeNote = st.activeNote; sessionNotes = st.sessionNotes
+      S = st.S; diskVersions = st.diskVersions; loading = st.loading
+      currentStore = st
+      return st
+    }
+    /** Serialize every store-touching operation, then activate one session inside it. */
+    async function withStore(sid, fn) {
+      return await withNoteLock('note-store', async function () {
+        if (sid) {
+          activate(sid)
+          // First touch of a session: resolve its workspace and load its note space.
+          if (!confirmed) bindSession(sid)
+          await ensureLoaded()
+        }
+        try { return await fn() } finally { saveCurrent() }
+      })
+    }
+    /** Register a model tool whose whole body runs inside the store lock. */
+    function registerToolLocked(def) {
+      const inner = def.execute
+      def.execute = async function (args, exec) {
+        const sid = sessionIdOfExec(exec)
+        return await withStore(sid, function () { return inner.call(def, args, exec) })
+      }
+      return harness.registerTool(ctx, def)
+    }
+    /** Register an RPC handler whose whole body runs inside the store lock. */
+    function handleLocked(method, fn) {
+      return harness.handle(method, async function (args) {
+        const sid = args && typeof args.sessionId === 'string' ? args.sessionId : ''
+        return await withStore(sid, function () { return fn(args) })
+      })
+    }
     function headerOf(a) { try { return a && a.session && a.session.header ? a.session.header : null } catch (err) { return null } }
     function cwdOfSession(ses) { try { const hd = ses && ses.header ? ses.header : null; return hd && typeof hd.cwd === 'string' ? hd.cwd : '' } catch (err) { return '' } }
     function fallbackBase() { try { if (policy && typeof policy.workspaceRoot === 'string' && policy.workspaceRoot) return policy.workspaceRoot } catch (err) { } return '.' }
@@ -175,6 +264,59 @@ return {
       pathCache = null
       return true
     }
+    /**
+     * Fold a note name into a safe directory segment. CJK/letters/digits survive so
+     * "会议纪要" stays readable; separators, control characters and Windows-reserved
+     * characters fold to '-'. A name that folds to nothing is rejected by the caller.
+     */
+    function sanitizeNoteName(raw) {
+      let s = String(raw === null || raw === undefined ? '' : raw).normalize('NFC').trim()
+      s = s.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '-')
+      s = s.replace(/\s+/g, ' ')
+      // A name must be ONE path segment: no separators (folded above), no ".." anywhere
+      // (folded here) and no leading/trailing punctuation that Windows dislikes.
+      s = s.replace(/\.{2,}/g, '-').replace(/^\.+/, '').replace(/\.+$/, '')
+      s = s.replace(/-{2,}/g, '-').replace(/^-+/, '').replace(/-+$/, '').trim()
+      if (s.length > MAX_NAME_LEN) s = s.slice(0, MAX_NAME_LEN).replace(/[-. ]+$/, '')
+      return s
+    }
+    function noteNameError(raw) {
+      const s = sanitizeNoteName(raw)
+      if (!s) return '笔记名不能为空（或只包含路径分隔符/保留字符）'
+      if (s !== String(raw === null || raw === undefined ? '' : raw).trim()) return ''
+      return ''
+    }
+    function sessionRoot() {
+      if (!sessionId) return ''
+      return base + '/' + ROOT_DIR + '/' + NOTES_DIR + '/' + sessionId
+    }
+    /** Paths of the ACTIVE note for the active session. */
+    function paths() {
+      const key = base + '|' + sessionId + '|' + activeNote
+      if (pathCache === null || pathCache.key !== key) {
+        const sroot = sessionRoot()
+        const name = activeNote || DEFAULT_NOTE
+        const dir = sroot ? sroot + '/' + name : base + '/' + NOTE_DIR
+        const p = {
+          key: key,
+          sessionRoot: sroot,
+          dir: dir,
+          note: dir + '/' + NOTE_FILE,
+          state: dir + '/' + STATE_FILE,
+          bad: dir + '/' + BAD_STATE_FILE,
+          session: sroot ? sroot + '/' + SESSION_FILE : '',
+          legacyDir: base + '/' + NOTE_DIR,
+          legacyNote: base + '/' + NOTE_DIR + '/' + NOTE_FILE,
+          name: name,
+        }
+        pathsCacheSet(p)
+        pathCache = p
+      }
+      return pathCache
+    }
+    function pathsCacheSet(p) { pathsRef = p }
+    let pathsRef = null
+    function sessionStatePath() { return sessionRoot() + '/' + SESSION_FILE }
     // `candidateFromInitiator()` and `candidateFromLiveAgents()` were removed with
     // ownFromAgents(): both guessed a workspace from ambient agent state ("who is the
     // current initiator", "there is exactly one agent so it must be them"). A store
@@ -184,19 +326,9 @@ return {
     function pickBase() {
       setBase(fallbackBase(), 'deployment')
     }
-    function paths() {
-      if (pathCache === null) {
-        pathCache = {
-          dir: base + '/' + NOTE_DIR,
-          note: base + '/' + NOTE_DIR + '/' + NOTE_FILE,
-          state: base + '/' + NOTE_DIR + '/' + STATE_FILE,
-          bad: base + '/' + NOTE_DIR + '/' + BAD_STATE_FILE,
-        }
-      }
-      return pathCache
-    }
     pickBase()
-    const S = { text: '', selections: [], seq: 0, revision: 1, savedAt: null, commitHash: '', committedAt: null, gitReady: false, gitTrace: '', error: '', fileExists: false, touched: false, stateVersion: STATE_VERSION }
+    // `let`, not `const`: the live value is swapped in and out per session (see activate).
+    let S = { text: '', selections: [], seq: 0, revision: 1, savedAt: null, commitHash: '', committedAt: null, gitReady: false, gitTrace: '', error: '', fileExists: false, touched: false, stateVersion: STATE_VERSION }
     function fail(where, err) { S.error = where + ': ' + (err && err.message ? err.message : String(err)); console.error(S.error) }
     function markTouched() { if (S.touched) return; S.touched = true; S.revision += 1 }
     // ── durability ────────────────────────────────────────────────────────────
@@ -227,7 +359,8 @@ return {
     //    version guard: we compared our own in-memory counter, which cannot see an
     //    external edit. The service offers `expected: { kind: 'replaceIfVersion' }`,
     //    which throws FS_STALE_VERSION if the file changed since we read it.
-    const diskVersions = new Map()
+    // `let`: swapped per session together with the rest of the store (see activate).
+    let diskVersions = new Map()
     function isStaleVersion(err) {
       return !!err && (err.code === 'FS_STALE_VERSION' || /changed since it was read/.test(String(err.message || '')))
     }
@@ -308,92 +441,184 @@ return {
       try { const hd = context && context.agent && context.agent.session && context.agent.session.header ? context.agent.session.header : null; return hd && typeof hd.id === 'string' ? hd.id : '' } catch (err) { return '' }
     }
     /**
-     * Whether the recorded owning session is still running. Used to decide if the store
-     * may be taken over: after a dsh restart the old session is gone and the note must
-     * be adoptable again, but while it is alive a second session must not claim it —
-     * that is what made a brand-new session "load the plugin by itself".
+     * Bind this store to one session. That is the whole "ownership" model now: the
+     * session id is a path segment, so isolation is structural and there is nothing to
+     * protect or steal. Refuses (returns false) when the session or its workspace cannot
+     * be resolved — the caller then reports that loudly instead of guessing.
      */
-    function ownerIsLive() {
-      if (!sessionId) return false
-      try {
-        if (!agents || typeof agents.list !== 'function') return false
-        const list = agents.list()
-        if (!list || !list.length) return false
-        for (let i = 0; i < list.length; i++) {
-          const a = list[i]
-          const hd = a && a.session && a.session.header ? a.session.header : null
-          if (hd && hd.id === sessionId) return true
-        }
-        return false
-      } catch (err) { return false }
-    }
-    /**
-     * True when this caller is a *different, identified* session while a live session
-     * owns the store. Such a caller is refused rather than silently served: it would
-     * otherwise read another session's note or take it over.
-     */
-    function foreignCaller(callerId) {
-      return !!(callerId && sessionId && callerId !== sessionId && ownerIsLive())
-    }
-    function adoptFrom(ses, authority) {
-      if (!ses) return false
-      let sid = ''
-      try { const hd = ses.header || {}; if (typeof hd.id === 'string') sid = hd.id } catch (err) { sid = '' }
-      if (sid) {
-        if (authority) {
-          // Taking over is allowed only when the store is unowned or its owner has
-          // ended. A live owner keeps it — see ownerIsLive().
-          if (sessionId && sid !== sessionId && ownerIsLive()) return false
-          sessionId = sid
-        } else {
-          if (sessionId && sid !== sessionId) return false
-          if (!sessionId) sessionId = sid
-        }
-      }
+    function bindSession(sid) {
+      if (typeof sid !== 'string' || !sid) return false
+      if (sessionId && sessionId !== sid) return false
+      let ses = null
+      try { if (sessions && typeof sessions.get === 'function') ses = sessions.get(sid) } catch (err) { ses = null }
+      const cwd = ses ? cwdOfSession(ses) : ''
       let pol = null
-      try { if (policy && typeof policy.resolve === 'function') pol = policy.resolve({ session: ses }) } catch (err) { pol = null }
+      try { if (policy && typeof policy.resolve === 'function') pol = policy.resolve({ session: ses || { header: { id: sid, cwd: base } } }) } catch (err) { pol = null }
       let root = ''
       try { root = pol && typeof pol.workspaceRoot === 'string' ? pol.workspaceRoot : '' } catch (err) { root = '' }
+      if (!root) root = cwd || fallbackBase()
       if (!root) return false
-      const already = canWrite() && base === root
+      sessionId = sid
       policyCache = pol
+      // Binding IS activation: the store can now read/write and create its directories.
       confirmed = true
-      const moved = setBase(root, authority ? 'session-tool' : 'session')
-      return moved || !already
+      setBase(root, 'session')
+      return true
     }
-    function adoptFromExec(exec) {
-      let ses = null
-      try { ses = exec && exec.agent && exec.agent.session ? exec.agent.session : null } catch (err) { ses = null }
-      return adoptFrom(ses, true)
+    function bindSessionFromExec(exec) {
+      return bindSession(sessionIdOfExec(exec))
     }
-    // Removed: ownFromAgents(). It adopted whichever session happened to be the only
-    // live agent (`agents.currentInitiator()` / a single-entry `agents.list()`), and it
-    // ran from ensureLoaded() — so an incidental tool call or RPC poll in an unrelated
-    // session could claim that session as this store's owner, making the card appear
-    // where it was never requested. AgentTeams has no such path: its workspace comes
-    // only from `agent.session.header.cwd` of the explicit tool caller. Ownership here
-    // is likewise explicit now — adoptFromHint (the card naming its own session) or
-    // adoptFromExec (a note_* tool call, with authority).
-    async function adoptFromHint(id) {
-      if (typeof id !== 'string' || !id) return false
-      if (sessionId && sessionId !== id) return false
-      let ses = null
-      try { if (!sessions || typeof sessions.get !== 'function') return false; ses = sessions.get(id) } catch (err) { ses = null }
-      if (!ses) return false
-      const cwd = cwdOfSession(ses)
-      if (!cwd) return false
-      // Existence only. Reading the whole note here ran on every RPC (the card polls
-      // every 2 seconds) and, once versions were tracked, it also poisoned the guard by
-      // re-pointing our basis at a file we never loaded.
-      const owns = await existsAt(cwd.replace(/[\\/]+$/, '') + '/' + NOTE_DIR + '/' + NOTE_FILE)
-      if (!owns) return false
-      return adoptFrom(ses, false)
+    /** Note directories that actually contain a note file. */
+    async function listNoteDirs() {
+      const sroot = sessionRoot()
+      if (!sroot || fs === undefined) return []
+      if (typeof fs.listDir !== 'function') throw new Error('fs 服务没有 listDir，无法列出本会话的笔记')
+      let entries = []
+      try {
+        const target = await fs.resolve(sroot, policyCache !== null ? { cwd: policyCache.workspaceRoot } : undefined)
+        entries = await fs.listDir(target, undefined)
+      } catch (err) {
+        // A missing session directory is the normal "no notes yet" case. Anything else is
+        // a real failure and must NOT be reported as "no notes" — that silently empties a
+        // session's note space, which is exactly the kind of bug this suite exists to catch.
+        const code = err && err.code ? String(err.code) : ''
+        const missing = code === 'FS_NOT_FOUND' || code === 'ENOENT' || /ENOENT|not found/i.test(String(err && err.message))
+        if (missing) return []
+        throw err
+      }
+      const out = []
+      for (let i = 0; i < entries.length; i++) {
+        const e = entries[i]
+        const name = e && typeof e.name === 'string' ? e.name : ''
+        const type = e && e.type ? e.type : ''
+        if (!name || name.charAt(0) === '.') continue
+        if (type && type !== 'directory') continue
+        const notePath = sroot + '/' + name + '/' + NOTE_FILE
+        if (await existsAt(notePath)) out.push(name)
+      }
+      out.sort(function (a, b) { return a.localeCompare(b) })
+      return out
+    }
+    async function readSessionState() {
+      if (!sessionId) return
+      let parsed = null
+      try {
+        const raw = await readIfExists(sessionStatePath())
+        if (raw !== null) parsed = JSON.parse(raw)
+      } catch (err) { parsed = null }
+      const want = parsed && typeof parsed.active === 'string' ? sanitizeNoteName(parsed.active) : ''
+      const names = await listNoteDirs()
+      sessionNotes = names
+      if (want && names.indexOf(want) >= 0) activeNote = want
+      else activeNote = names.length ? names[0] : ''
+      pathCache = null
+    }
+    async function writeSessionState() {
+      if (!sessionId) return
+      try {
+        const payload = { v: SESSION_STATE_VERSION, sessionId: sessionId, active: activeNote || '', updatedAt: isoNow() }
+        await writeAt(sessionStatePath(), JSON.stringify(payload, null, 2) + '\n')
+      } catch (err) { fail('写入会话状态', err) }
+    }
+    /** Make `name` the active note of this session (must exist). */
+    async function selectNote(name) {
+      const clean = sanitizeNoteName(name)
+      const names = await listNoteDirs()
+      if (names.indexOf(clean) < 0) return { ok: false, error: '笔记不存在: ' + String(name) }
+      activeNote = clean
+      sessionNotes = names
+      pathCache = null
+      loadedBase = ''
+      S.text = ''
+      S.selections = []
+      S.revision += 1
+      await writeSessionState()
+      await load()
+      return { ok: true, active: activeNote }
+    }
+    /**
+     * One-shot migration of the legacy single-note layout into this session's subtree.
+     * Runs only for an explicit action, only when this session has no notes yet and the
+     * legacy note exists. The legacy git repository moves with it, so history continues.
+     */
+    async function migrateLegacyIfNeeded() {
+      if (!confirmed || !sessionId) return false
+      const legacy = paths().legacyNote
+      if (!(await existsAt(legacy))) return false
+      const names = await listNoteDirs()
+      if (names.length > 0) return false
+      const name = DEFAULT_NOTE
+      const targetDir = sessionRoot() + '/' + name
+      try {
+        await mkdirAt(targetDir)
+        // Copy the note and its state; the legacy tree is left intact on purpose so a
+        // failed migration can never lose the original.
+        const legacyText = await readIfExists(legacy)
+        if (legacyText !== null) await writeAt(targetDir + '/' + NOTE_FILE, legacyText)
+        const legacyState = await readIfExists(paths().legacyDir + '/' + STATE_FILE)
+        if (legacyState !== null) await writeAt(targetDir + '/' + STATE_FILE, legacyState)
+        const legacyGit = paths().legacyDir + '/.git'
+        if (await existsAt(legacyGit)) {
+          await copyTree(legacyGit, targetDir + '/.git')
+        }
+        activeNote = name
+        pathCache = null
+        loadedBase = ''
+        await writeSessionState()
+        S.gitTrace = (S.gitTrace ? S.gitTrace + ' | ' : '') + 'migrated from ' + paths().legacyDir
+        return true
+      } catch (err) { fail('迁移旧笔记', err); return false }
+    }
+    /** Create a directory by writing into it: the abstract fs service has no mkdir. */
+    async function mkdirAt(path) {
+      if (fs === undefined) throw new Error('fs 服务不可用')
+      if (typeof fs.mkdir === 'function') {
+        const target = await fs.resolve(path, policyCache !== null ? { cwd: policyCache.workspaceRoot } : undefined)
+        await fs.mkdir(target, undefined, policyCache !== null ? policyCache : undefined)
+        return
+      }
+      // The abstract service has no mkdir on some deployments; writing a file into the
+      // directory creates it (the service creates parents for an atomic write).
+      await writeAt(path.replace(/\/+$/, '') + '/.keep', '')
+    }
+    /**
+     * Copy the legacy git repository into the new note directory.
+     *
+     * Done through the shell (Copy-Item -Recurse) on purpose: the abstract \`fs\` service
+     * has no writeBytes, so a hand-rolled recursive copy could not move binary objects at
+     * all — the first version of this silently copied nothing. Reported, not thrown, when
+     * no shell is available: the note content is what must not be lost.
+     */
+    async function copyTree(from, to) {
+      const r = await runShell('Copy-Item -LiteralPath "' + from.replace(/"/g, '\`"') + '" -Destination "' + to.replace(/"/g, '\`"') + '" -Recurse -Force -ErrorAction Stop')
+      if (!r.ok) throw new Error(r.err || 'Copy-Item 失败')
+    }
+    function sessionStateView() {
+      return {
+        sessionId: sessionId,
+        notesDir: sessionRoot(),
+        notes: sessionNotes || [],
+        active: activeNote,
+      }
     }
     let loading = null
     async function load() {
       if (fs === undefined) { S.error = 'fs 服务不可用'; return }
       loadedBase = base
       const p = paths()
+      S.text = ''
+      S.selections = []
+      S.fileExists = false
+      // No active note is a normal state now (a session starts with none), not an error:
+      // the card shows its empty state and the tools report "create one first".
+      if (!activeNote) {
+        S.savedAt = isoNow()
+        S.gitReady = false
+        S.commitHash = ''
+        S.committedAt = null
+        S.revision += 1
+        return
+      }
       try {
         const raw = await readIfExists(p.note, { track: true })
         if (raw === null) { S.text = SEED_TEXT; S.fileExists = false }
@@ -425,47 +650,22 @@ return {
     }
     function ensureLoaded() {
       if (loading !== null) return loading
-      // No ambient adoption here. `ownFromAgents()` used to run on *every* load —
-      // "the profile has exactly one live agent, so that must be the owner" — which
-      // meant any incidental call (a tool, an RPC poll) could claim the session as
-      // this store's owner and make the card appear in a session that never asked
-      // for it. Ownership is now established only by an explicit action: the card
-      // naming its own session in an RPC (adoptFromHint) or a note_* tool call
-      // (adoptFromExec, which is authority). Without either, a session is simply
-      // not a participant and reads are reported as such (see stateView).
-      if (!confirmed) pickBase()
-      loading = load().catch(function (err) { loading = null; fail('初始化', err) })
+      loading = (async function () {
+        if (!sessionId) { S.error = '本会话没有可用的会话 id'; return }
+        await readSessionState()
+        // A session that has never had a note inherits the legacy single-note layout
+        // exactly once (see migrateLegacyIfNeeded), so upgrading loses nothing.
+        if (!activeNote) {
+          const moved = await migrateLegacyIfNeeded()
+          if (moved) { await readSessionState() }
+        }
+        await load()
+      })().catch(function (err) { loading = null; fail('初始化', err) })
       return loading
     }
-    async function migrate() {
-      if (loadedBase === base) return
-      const prevText = S.text
-      const prevSels = S.selections
-      loadedBase = base
-      S.gitReady = false
-      S.commitHash = ''
-      S.committedAt = null
-      try {
-        // migrate() re-reads the note as this store's new basis, so the version it
-        // records is the one the guard must compare against afterwards.
-        const raw = await readIfExists(paths().note, { track: true })
-        if (raw === null) {
-          if (prevText) { await writeAt(paths().note, prevText); S.fileExists = true }
-          else { S.text = SEED_TEXT; S.fileExists = false }
-        } else {
-          const nt = String(raw).replace(/\r\n?/g, '\n')
-          S.fileExists = true
-          if (nt !== prevText) {
-            S.selections = prevSels.length > 0 ? remapSelections(prevSels, prevText, nt) : prevSels
-            S.text = nt
-          }
-        }
-        S.savedAt = isoNow()
-        S.revision += 1
-        await persistState()
-      } catch (err) { fail('迁移笔记位置', err) }
-      await ensureGit()
-    }
+    // The old `migrate()` moved one shared note when the workspace base changed. With
+    // per-session, per-note directories there is nothing to move: a different session or
+    // a different note is simply a different path, and load() reads it fresh.
     async function persistState() {
       if (fs === undefined) return
       if (!canWrite()) return
@@ -494,8 +694,7 @@ return {
       // is still running: it gets the opaque answer too (plus the owner's id, so a human
       // can tell why). Only an unidentified caller — which cannot be a session — or the
       // owner itself sees the note.
-      const foreign = !!(callerId && sessionId && callerId !== sessionId)
-      if (!confirmed || foreign) {
+      if (!confirmed || !sessionId) {
         return {
           revision: S.revision,
           text: '',
@@ -507,9 +706,30 @@ return {
           confirmed: false,
           touched: false,
           sessionId: '',
-          // Deliberately opaque: no path, no content. The owner id is reported only so
-          // the human can see which session holds it.
-          ownerSessionId: foreign ? sessionId : '',
+          notes: [],
+          active: '',
+          notesDir: '',
+          inactive: true,
+        }
+      }
+      const foreign = !!(callerId && callerId !== sessionId)
+      if (foreign) {
+        // Structural isolation: this caller has its own subtree, so it gets an empty
+        // answer rather than a peek at this one. Its own card resolves on its own session.
+        return {
+          revision: 0,
+          text: '',
+          lineCount: 0,
+          selections: [],
+          path: '',
+          relPath: '',
+          baseFrom: '',
+          confirmed: false,
+          touched: false,
+          sessionId: '',
+          notes: [],
+          active: '',
+          notesDir: '',
           inactive: true,
         }
       }
@@ -518,8 +738,11 @@ return {
         text: S.text,
         lineCount: linesOf(S.text).length,
         selections: viewSelections(),
-        path: paths().note,
-        relPath: NOTE_DIR + '/' + NOTE_FILE,
+        path: activeNote ? paths().note : '',
+        relPath: activeNote ? (ROOT_DIR + '/' + NOTES_DIR + '/' + sessionId + '/' + activeNote + '/' + NOTE_FILE) : '',
+        notesDir: sessionRoot(),
+        notes: sessionNotes || [],
+        active: activeNote,
         baseFrom: baseFrom,
         confirmed: confirmed,
         touched: S.touched === true,
@@ -631,28 +854,205 @@ return {
       },
     }
     function firstLineOf(s) { const t = String(s).replace(/^\s+/, '').split('\n')[0]; return t.length > 48 ? t.slice(0, 48) + ' ...' : t }
-    // A note_* tool call is the explicit act that makes a session a participant
-    // (adoptFromExec is authority: it carries the calling agent's own workspace).
-    // Resolving it must be loud rather than silent, exactly like AgentTeams'
-    // requireCaptain: a tool that quietly picked a workspace by guessing is how a
-    // session ended up reading a note it never asked for.
-    async function enterFromTool(where, exec) {
-      const callerId = sessionIdOfExec(exec)
-      // A different, still-running session must not be served at all — reading included.
-      // Without this a new session's agent could call a note_* tool, be handed the other
-      // session's note, and (through the authority path below) take it over; that is what
-      // "a new session loaded the plugin by itself" looked like.
-      if (foreignCaller(callerId)) {
-        throw new Error(where + ' 被拒绝：这份笔记归属另一个仍在运行的会话（' + sessionId + '）。同一个工作区同时只允许一个会话拥有它。若用户希望在本会话里使用笔记卡片，请先结束或释放原会话，或在本会话中显式要求接管。')
+    // A note_* tool call is the explicit act that binds this plugin to the calling
+    // session. The session id is a PATH SEGMENT now, so binding is all that is needed:
+    // there is no owner to protect and nothing to steal, and a session that never acts
+    // is simply a session with no notes. Resolution stays loud — a tool that quietly
+    // guessed a workspace is how a session once read a note it never asked for.
+    async function enterFromTool(where, exec, opts) {
+      if (!bindSessionFromExec(exec)) {
+        throw new Error(where + ' 无法确定本会话：调用方没有可用的 agent/会话上下文（需要 session id 与工作区）。请在正常会话里调用，或先用 note_diag 确认。')
       }
-      const moved = adoptFromExec(exec)
-      if (!confirmed) {
-        throw new Error(where + ' 无法确定本会话的工作区：调用方没有可用的 agent/会话上下文。请在正常会话里调用，或先用 note_diag 确认归属。')
-      }
+      confirmed = true
       await ensureLoaded()
-      if (moved) await migrate()
+      // Management tools (list/create/open) must work in a session that has no note yet.
+      if (!(opts && opts.allowEmpty)) await requireActiveNote(where)
     }
-    harness.registerTool(ctx, harness.defineTool({
+    /** Refuse (loudly) when the session has no note open, and say how to fix that. */
+    async function requireActiveNote(where) {
+      if (activeNote) return activeNote
+      const names = await listNoteDirs()
+      if (names.length) { await selectNote(names[0]); return activeNote }
+      throw new Error(where + ' 失败：本会话还没有任何笔记。先用 note_create 建一份（可以 from=<文件路径> 从文件导入），note_list 可以看本会话有哪些笔记。')
+    }
+    /** Body of note_create: empty | text | file(path) | base64 upload. */
+    async function createNote(input) {
+      const a = input || {}
+      const name = sanitizeNoteName(a.name)
+      if (!name) return { ok: false, error: '笔记名不能为空（或只含路径分隔符/保留字符）' }
+      const names = await listNoteDirs()
+      if (names.indexOf(name) >= 0) return { ok: false, error: '已存在同名笔记: ' + name }
+      let content = ''
+      let kind = 'empty'
+      if (typeof a.text === 'string' && a.text !== '') { content = a.text; kind = 'text' }
+      else if (typeof a.from === 'string' && a.from) {
+        const raw = await readIfExists(a.from)
+        if (raw === null) return { ok: false, error: '导入失败：读不到文件 ' + a.from }
+        content = String(raw).replace(/\r\n?/g, '\n')
+        kind = 'file'
+      } else if (typeof a.base64 === 'string' && a.base64) {
+        content = Buffer.from(a.base64, 'base64').toString('utf8').replace(/\r\n?/g, '\n')
+        kind = 'upload'
+      }
+      if (kind === 'empty') content = '# ' + name + '\n'
+      const dir = sessionRoot() + '/' + name
+      try {
+        await mkdirAt(dir)
+        await writeAt(dir + '/' + NOTE_FILE, content)
+      } catch (err) { return { ok: false, error: '创建失败: ' + ((err && err.message) || String(err)) } }
+      if (a.open !== false) {
+        activeNote = name
+        pathCache = null
+        loadedBase = ''
+        await writeSessionState()
+        await load()
+        if (canWrite()) {
+          try { await ensureGit() } catch (err) { }
+          try { await commit('note: 新建 ' + name + (kind === 'empty' ? '' : '（来自' + kind + '）')) } catch (err) { }
+        }
+      } else sessionNotes = null
+      return { ok: true, name: name, active: activeNote, source: kind, lineCount: linesOf(content).length, sessionId: sessionId, dir: dir }
+    }
+    /** Clear the active note's body, keeping its git history (a commit records it). */
+    async function clearNote(opts) {
+      const a = opts || {}
+      const name = activeNote
+      if (!name) return { ok: false, error: '本会话没有打开的笔记' }
+      const lines = linesOf(S.text).length
+      const title = typeof a.title === 'string' && a.title ? String(a.title) : name
+      const next = '# ' + title + '\n'
+      if (canWrite()) {
+        try { await commit('note: 清空前快照（' + lines + ' 行）') } catch (err) { }
+        try { await writeAt(paths().note, next) } catch (err) { return { ok: false, error: '清空失败: ' + ((err && err.message) || String(err)) } }
+        S.text = next; S.fileExists = true; S.savedAt = isoNow()
+        S.selections = []
+        S.revision += 1
+        try { await persistState() } catch (err) { }
+        try { await commit('note: 清空 ' + name + '（保留历史）') } catch (err) { }
+      } else { S.text = next; S.selections = []; S.revision += 1 }
+      return { ok: true, name: name, clearedLines: lines, keptHistory: true }
+    }
+    /** Delete a note entirely — its directory, its state file and its git repository. */
+    async function deleteNote(name, confirm) {
+      const clean = sanitizeNoteName(name)
+      if (!clean) return { ok: false, error: '笔记名非法' }
+      const names = await listNoteDirs()
+      if (names.indexOf(clean) < 0) return { ok: false, error: '笔记不存在: ' + String(name) }
+      if (confirm !== true) return { ok: false, error: '删除需要显式确认（confirm: true）：整个目录连同 git 历史都会被删除，无法恢复。', needsConfirm: true, name: clean }
+      try { await removeTree(sessionRoot() + '/' + clean) } catch (err) { return { ok: false, error: '删除失败: ' + ((err && err.message) || String(err)) } }
+      const left = await listNoteDirs()
+      sessionNotes = left
+      if (activeNote === clean) {
+        activeNote = left.length ? left[0] : ''
+        pathCache = null
+        loadedBase = ''
+        await writeSessionState()
+        await load()
+      }
+      return { ok: true, deleted: clean, remaining: left, active: activeNote }
+    }
+    /** Rename a note's directory (its git history moves with it). */
+    async function renameNote(from, to) {
+      const a = sanitizeNoteName(from)
+      const b = sanitizeNoteName(to)
+      if (!a || !b) return { ok: false, error: '笔记名非法' }
+      const names = await listNoteDirs()
+      if (names.indexOf(a) < 0) return { ok: false, error: '笔记不存在: ' + String(from) }
+      if (names.indexOf(b) >= 0) return { ok: false, error: '目标名已存在: ' + b }
+      try { await moveTree(sessionRoot() + '/' + a, sessionRoot() + '/' + b) } catch (err) { return { ok: false, error: '重命名失败: ' + ((err && err.message) || String(err)) } }
+      if (activeNote === a) {
+        activeNote = b
+        pathCache = null
+        loadedBase = ''
+        await writeSessionState()
+        await load()
+      }
+      return { ok: true, from: a, to: b, active: activeNote }
+    }
+    /** Import text/file/upload into the ACTIVE note (append or replace). */
+    async function importIntoActiveNote(input) {
+      const a = input || {}
+      if (!activeNote) return { ok: false, error: '本会话没有打开的笔记' }
+      let content = ''
+      let kind = ''
+      if (typeof a.text === 'string' && a.text !== '') { content = a.text; kind = 'text' }
+      else if (typeof a.from === 'string' && a.from) {
+        const raw = await readIfExists(a.from)
+        if (raw === null) return { ok: false, error: '导入失败：读不到文件 ' + a.from }
+        content = String(raw).replace(/\r\n?/g, '\n'); kind = 'file'
+      } else if (typeof a.base64 === 'string' && a.base64) {
+        content = Buffer.from(a.base64, 'base64').toString('utf8').replace(/\r\n?/g, '\n'); kind = 'upload'
+      } else return { ok: false, error: '需要 text、from 或 base64 之一' }
+      const mode = a.mode === 'replace' ? 'replace' : 'append'
+      const cur = String(S.text)
+      const next = mode === 'replace' ? content : (cur.replace(/\s+$/, '') === '' ? content.replace(/^\s+/, '') : cur.replace(/\s+$/, '') + '\n\n' + content.replace(/^\s+/, ''))
+      const r = await saveText(next, undefined)
+      if (!r || r.ok !== true) return { ok: false, error: (r && r.error) || '写入失败' }
+      if (canWrite()) { try { await commit('note: 导入到 ' + activeNote + '（' + kind + '）') } catch (err) { } }
+      return { ok: true, name: activeNote, mode: mode, source: kind, lineCount: linesOf(next).length }
+    }
+    /** Remove a directory tree (note_delete). Prefers the fs service, falls back to shell. */
+    async function removeTree(dir) {
+      if (fs === undefined) throw new Error('fs 服务不可用')
+      if (typeof fs.rm === 'function') {
+        const target = await fs.resolve(dir, policyCache !== null ? { cwd: policyCache.workspaceRoot } : undefined)
+        await fs.rm(target, { recursive: true, force: true }, policyCache !== null ? policyCache : undefined)
+        return
+      }
+      const r = await runShell('Remove-Item -LiteralPath "' + dir.replace(/"/g, '`"') + '" -Recurse -Force -ErrorAction Stop')
+      if (!r.ok) throw new Error(r.err || '删除目录失败（fs.rm 与 shell 都不可用）')
+    }
+    /** Move/rename a directory tree. */
+    async function moveTree(from, to) {
+      const r = await runShell('Move-Item -LiteralPath "' + from.replace(/"/g, '`"') + '" -Destination "' + to.replace(/"/g, '`"') + '" -ErrorAction Stop')
+      if (!r.ok) throw new Error(r.err || 'Move-Item 失败')
+    }
+    /** Run a raw shell command in the workspace root (directory operations only). */
+    async function runShell(command) {
+      if (shell === undefined) return { ok: false, err: 'shell 服务不可用' }
+      const req = { command: command, workdir: base, timeoutMs: 30000 }
+      if (policyCache !== null) req.sandboxPolicy = policyCache
+      const spec = shell.resolve(req)
+      const r = await shell.run(spec)
+      const out = r && r.stdout && typeof r.stdout.text === 'string' ? r.stdout.text : ''
+      const err = r && r.stderr && typeof r.stderr.text === 'string' ? r.stderr.text : ''
+      return { ok: r && r.exitCode === 0, out: out.trim(), err: err.trim() }
+    }
+    /** Per-note summary rows for the panel and note_list. */
+    async function notesView() {
+      const names = await listNoteDirs()
+      sessionNotes = names
+      const out = []
+      for (let i = 0; i < names.length; i++) {
+        const name = names[i]
+        const dir = sessionRoot() + '/' + name
+        let lines = 0
+        let bytes = 0
+        try {
+          const raw = await readIfExists(dir + '/' + NOTE_FILE)
+          if (raw !== null) { lines = linesOf(raw).length; bytes = raw.length }
+        } catch (err) { }
+        let commitHash = ''
+        if (name === activeNote) commitHash = S.commitHash
+        else {
+          const r = await runGitIn(dir, 'rev-parse --short HEAD')
+          if (r.ok) commitHash = r.out
+        }
+        out.push({ name: name, active: name === activeNote, lines: lines, bytes: bytes, commitHash: commitHash })
+      }
+      return out
+    }
+    async function runGitIn(dir, args) {
+      if (shell === undefined) return { ok: false, out: '', err: 'shell 服务不可用' }
+      const req = { command: 'git ' + args, workdir: dir, timeoutMs: 30000 }
+      if (policyCache !== null) req.sandboxPolicy = policyCache
+      const spec = shell.resolve(req)
+      const r = await shell.run(spec)
+      const out = r && r.stdout && typeof r.stdout.text === 'string' ? r.stdout.text : ''
+      const err = r && r.stderr && typeof r.stderr.text === 'string' ? r.stderr.text : ''
+      return { ok: r && r.exitCode === 0, out: out.trim(), err: err.trim() }
+    }
+    registerToolLocked(harness.defineTool({
       name: 'note_get_selections',
       description: '读取笔记卡片里用户划选过的全部内容(按正文先后排序的对象数组)。每项含 id、序号 order、起止行/列(1 基行号、0 基列号)、选中时间 createdAt、原文 text、是否已被取用过 fetched、原文是否已变动 stale。',
       parameters: { includeText: { type: 'boolean', description: '是否返回原文 text，默认 true。' } },
@@ -665,7 +1065,7 @@ return {
         return list
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_take_new_selections',
       description: '领取用户自上次领取之后新划选的内容(只返回 fetched=false 的对象，并立即把它们标记为已取用，避免重复返回)。回答用户问题前应先调用它，看看用户新划了哪些重点。',
       parameters: {},
@@ -687,7 +1087,7 @@ return {
         })
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_read',
       description: '读取笔记卡片当前正文(磁盘文件 note.md 的实时内容)。返回内容带行号，方便与选中对象的行号对应;也包含选中内容概览。',
       parameters: { withLineNumbers: { type: 'boolean', description: '是否在正文前加行号，默认 true。' }, fromLine: { type: 'integer', description: '只读这一段的第一行(1 基，含)。省略则从头。' }, toLine: { type: 'integer', description: '读到这一行(1 基，含)。省略则到底。' }, padding: { type: 'integer', description: '上下各多读几行，默认 0。' } },
@@ -717,7 +1117,7 @@ return {
         return { path: paths().note, lineCount: all.length, fromLine: from, toLine: to, revision: S.revision, selections: selRender(viewSelections()), text: all.slice(from - 1, to).join('\n') }
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_diag',
       description: '诊断笔记卡片的运行环境（只读）：返回落盘路径、所属会话、git 状态与最后一次错误。',
       parameters: {},
@@ -729,12 +1129,12 @@ return {
         render: function (a, v) { return [{ type: 'text', text: 'path=' + v.path + '\nbaseFrom=' + v.baseFrom + ' confirmed=' + v.confirmed + ' touched=' + v.touched + '\nownerSessionId=' + v.sessionId + '\ngitReady=' + v.gitReady + '\nerror=' + v.error }] },
       },
       async execute(args, exec) {
-        await enterFromTool('note_diag', exec)
+        await enterFromTool('note_diag', exec, { allowEmpty: true })
         markTouched()
         return { path: paths().note, baseFrom: baseFrom, confirmed: confirmed, touched: S.touched === true, sessionId: sessionId, gitReady: S.gitReady, gitTrace: S.gitTrace, error: S.error }
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_write',
       description: '把 Markdown 内容写进笔记卡片(也就是磁盘上的 note.md)，写完立刻显示在卡片里。mode=append 追加到末尾(默认)、replace 整篇覆盖、prepend 插到最前面。默认会自动 git 提交一次;用户已有的选中对象行号会自动跟着重算。',
       parameters: {
@@ -775,7 +1175,7 @@ return {
         })
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_commit',
       description: '把笔记卡片当前内容 git 提交一次(用户点保存按钮做的是同一件事)。',
       parameters: { message: { type: 'string', description: '提交信息，省略则自动生成。' } },
@@ -794,11 +1194,227 @@ return {
         })
       },
     }))
-    harness.handle('state', async function (args) {
-      const callerId = args && typeof args.sessionId === 'string' ? args.sessionId : ''
-      const moved = await adoptFromHint(callerId)
+
+    // ── 笔记管理工具（本次升级新增）────────────────────────────────────────────
+    // These act on the calling session's own note space, so they work even when the
+    // session has no note yet (opts.allowEmpty).
+    registerToolLocked(harness.defineTool({
+      name: 'note_list',
+      description: '列出本会话的所有笔记（每份笔记是 dsh-window/note/<会话id>/<笔记名>/ 下的一个目录，各有自己的 git）。标注当前打开的是哪一份。',
+      parameters: {},
+      output: {
+        schema: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            notesDir: { type: 'string', required: true },
+            active: { type: 'string', required: true },
+            notes: {
+              type: 'array', required: true,
+              items: {
+                type: 'object', additionalProperties: false,
+                properties: { name: { type: 'string', required: true }, active: { type: 'boolean', required: true }, lines: { type: 'integer', required: true }, bytes: { type: 'integer', required: true }, commitHash: { type: 'string', required: true } },
+              },
+            },
+          },
+        },
+        render: function (a, v) {
+          const rows = (v.notes || []).map(function (n) { return (n.active ? '* ' : '- ') + n.name + '  ' + n.lines + ' 行' + (n.commitHash ? '  git ' + n.commitHash : '') })
+          return [{ type: 'text', text: '会话 ' + v.notesDir.split('/').slice(-1)[0] + ' 的笔记（' + (v.notes || []).length + ' 份）' + (v.active ? '，当前打开: ' + v.active : '，当前没有打开任何笔记') + '\n' + (rows.length ? rows.join('\n') : '(还没有笔记，用 note_create 新建)') }]
+        },
+      },
+      async execute(args, exec) {
+        await enterFromTool('note_list', exec, { allowEmpty: true })
+        const notes = await notesView()
+        return { notesDir: sessionRoot(), active: activeNote, notes: notes }
+      },
+    }))
+    registerToolLocked(harness.defineTool({
+      name: 'note_create',
+      description: '在本会话新建一份笔记并默认打开它。支持三种来源：空笔记(默认)、从工作区里的文件导入(from=<路径>)、或直接给内容(text)。新建后会在该笔记目录初始化 git 并提交一次。',
+      parameters: {
+        name: { type: 'string', required: true, description: '笔记名（作为目录名；中文可用，路径分隔符会自动替换为 -）' },
+        from: { type: 'string', description: '从哪个文件导入内容（绝对路径或相对工作区）' },
+        text: { type: 'string', description: '直接作为初始内容' },
+        open: { type: 'boolean', description: '是否立即打开，默认 true' },
+      },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, name: { type: 'string', required: true }, active: { type: 'string', required: true }, source: { type: 'string', required: true }, lineCount: { type: 'integer', required: true }, dir: { type: 'string', required: true }, error: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已新建笔记《' + v.name + '》(' + v.source + ', ' + v.lineCount + ' 行)' + (v.active === v.name ? '，并已打开' : '') + '\n目录: ' + v.dir) : ('新建失败: ' + v.error) }] },
+      },
+      async execute(args, exec) {
+        await enterFromTool('note_create', exec, { allowEmpty: true })
+        return await withNoteLock(noteLockKey(), async function () { return await createNote(args || {}) })
+      },
+    }))
+    registerToolLocked(harness.defineTool({
+      name: 'note_open',
+      description: '切换本会话当前打开的笔记（之后所有 note_* 工具都作用于它）。',
+      parameters: { name: { type: 'string', required: true, description: '本会话已有的笔记名' } },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, active: { type: 'string', required: true }, lineCount: { type: 'integer', required: true }, error: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已切换到《' + v.active + '》(' + v.lineCount + ' 行)') : ('切换失败: ' + v.error) }] },
+      },
+      async execute(args, exec) {
+        await enterFromTool('note_open', exec, { allowEmpty: true })
+        return await withNoteLock(noteLockKey(), async function () {
+          const r = await selectNote(args && args.name)
+          return r.ok ? { ok: true, active: activeNote, lineCount: linesOf(S.text).length, error: '' } : { ok: false, active: activeNote, lineCount: 0, error: r.error }
+        })
+      },
+    }))
+    registerToolLocked(harness.defineTool({
+      name: 'note_clear',
+      description: '清空当前笔记的正文，但**保留它的 git 历史**（清空前会自动提交一次快照，清空后再提交一次）。想彻底删除整份笔记请用 note_delete。',
+      parameters: { title: { type: 'string', description: '清空后写入的标题，默认用笔记名' } },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, name: { type: 'string', required: true }, clearedLines: { type: 'integer', required: true }, keptHistory: { type: 'boolean', required: true }, error: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已清空《' + v.name + '》(' + v.clearedLines + ' 行被清掉，git 历史保留)') : ('清空失败: ' + v.error) }] },
+      },
+      async execute(args, exec) {
+        await enterFromTool('note_clear', exec)
+        return await withNoteLock(noteLockKey(), function () { return clearNote(args || {}) })
+      },
+    }))
+    registerToolLocked(harness.defineTool({
+      name: 'note_delete',
+      description: '永久删除某份笔记：整个目录（note.md、选中记录、以及它自己的 .git 历史）都会被删除，无法恢复。必须带 confirm: true。',
+      parameters: { name: { type: 'string', required: true, description: '要删除的笔记名' }, confirm: { type: 'boolean', description: '必须为 true 才会真的删除' } },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, deleted: { type: 'string', required: true }, active: { type: 'string', required: true }, remaining: { type: 'array', required: true, items: { type: 'string' } }, needsConfirm: { type: 'boolean', required: true }, error: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已删除《' + v.deleted + '》连同其 git；本会话还剩 ' + v.remaining.length + ' 份' + (v.active ? '，当前打开《' + v.active + '》' : '')) : ('删除失败: ' + v.error) }] },
+      },
+      async execute(args, exec) {
+        await enterFromTool('note_delete', exec, { allowEmpty: true })
+        return await withNoteLock(noteLockKey(), async function () {
+          const r = await deleteNote(args && args.name, !!(args && args.confirm))
+          return Object.assign({ deleted: '', active: activeNote, remaining: sessionNotes || [], needsConfirm: false, error: '' }, r)
+        })
+      },
+    }))
+    registerToolLocked(harness.defineTool({
+      name: 'note_rename',
+      description: '重命名一份笔记（目录改名，它的 git 历史随之保留）。',
+      parameters: { from: { type: 'string', required: true }, to: { type: 'string', required: true } },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, from: { type: 'string', required: true }, to: { type: 'string', required: true }, active: { type: 'string', required: true }, error: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已重命名: ' + v.from + ' -> ' + v.to) : ('重命名失败: ' + v.error) }] },
+      },
+      async execute(args, exec) {
+        await enterFromTool('note_rename', exec, { allowEmpty: true })
+        return await withNoteLock(noteLockKey(), async function () {
+          const r = await renameNote(args && args.from, args && args.to)
+          return Object.assign({ from: '', to: '', active: activeNote, error: '' }, r)
+        })
+      },
+    }))
+    registerToolLocked(harness.defineTool({
+      name: 'note_import',
+      description: '把外部内容导入到当前笔记：from=<文件路径> 或 text=<直接内容>；mode=append(默认,追加) / replace(覆盖)。',
+      parameters: { from: { type: 'string', description: '源文件路径' }, text: { type: 'string', description: '直接给内容' }, mode: { type: 'string', enum: ['append', 'replace'], description: '导入方式' } },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, name: { type: 'string', required: true }, mode: { type: 'string', required: true }, source: { type: 'string', required: true }, lineCount: { type: 'integer', required: true }, error: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已导入到《' + v.name + '》(' + v.mode + ', 来源 ' + v.source + ')，现在 ' + v.lineCount + ' 行') : ('导入失败: ' + v.error) }] },
+      },
+      async execute(args, exec) {
+        await enterFromTool('note_import', exec)
+        return await withNoteLock(noteLockKey(), async function () {
+          const r = await importIntoActiveNote(args || {})
+          return Object.assign({ name: activeNote, mode: 'append', source: '', lineCount: 0, error: '' }, r)
+        })
+      },
+    }))
+    registerToolLocked(harness.defineTool({
+      name: 'note_export',
+      description: '把当前笔记正文导出（复制）到一个外部文件路径，方便交给别的会话/工具。',
+      parameters: { to: { type: 'string', required: true, description: '目标文件路径' } },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, to: { type: 'string', required: true }, bytes: { type: 'integer', required: true }, error: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已导出到 ' + v.to + ' (' + v.bytes + ' 字节)') : ('导出失败: ' + v.error) }] },
+      },
+      async execute(args, exec) {
+        await enterFromTool('note_export', exec)
+        const to = String((args && args.to) || '')
+        if (!to) return { ok: false, to: '', bytes: 0, error: '需要 to 参数' }
+        try { await writeAt(to, S.text) } catch (err) { return { ok: false, to: to, bytes: 0, error: (err && err.message) || String(err) } }
+        return { ok: true, to: to, bytes: S.text.length, error: '' }
+      },
+    }))
+
+
+    // ── 面板用的笔记管理 RPC（本次升级新增）──────────────────────────────────
+    handleLocked('listNotes', async function (args) {
+      if (!bindSession(args && args.sessionId)) return notMine('listNotes')
+      confirmed = true
       await ensureLoaded()
-      if (moved) await migrate()
+      return { ok: true, notesDir: sessionRoot(), active: activeNote, notes: await notesView(), sessionId: sessionId }
+    })
+    handleLocked('createNote', async function (args) {
+      const a = args || {}
+      if (!bindSession(a.sessionId)) return notMine('createNote')
+      confirmed = true
+      await ensureLoaded()
+      return await withNoteLock(noteLockKey(), async function () {
+        const r = await createNote(a)
+        return Object.assign({ notes: await notesView(), active: activeNote }, r)
+      })
+    })
+    handleLocked('selectNote', async function (args) {
+      const a = args || {}
+      if (!bindSession(a.sessionId)) return notMine('selectNote')
+      confirmed = true
+      await ensureLoaded()
+      return await withNoteLock(noteLockKey(), async function () {
+        const r = await selectNote(a.name)
+        if (!r.ok) return { ok: false, error: r.error }
+        return Object.assign({ ok: true, notes: await notesView() }, stateView(a.sessionId))
+      })
+    })
+    handleLocked('clearNote', async function (args) {
+      const a = args || {}
+      if (!bindSession(a.sessionId)) return notMine('clearNote')
+      confirmed = true
+      await ensureLoaded()
+      return await withNoteLock(noteLockKey(), async function () {
+        const r = await clearNote(a)
+        return Object.assign({ notes: await notesView() }, r)
+      })
+    })
+    handleLocked('deleteNote', async function (args) {
+      const a = args || {}
+      if (!bindSession(a.sessionId)) return notMine('deleteNote')
+      confirmed = true
+      await ensureLoaded()
+      return await withNoteLock(noteLockKey(), async function () {
+        const r = await deleteNote(a.name, !!(a.confirm))
+        return Object.assign({ notes: await notesView(), active: activeNote }, r)
+      })
+    })
+    handleLocked('renameNote', async function (args) {
+      const a = args || {}
+      if (!bindSession(a.sessionId)) return notMine('renameNote')
+      confirmed = true
+      await ensureLoaded()
+      return await withNoteLock(noteLockKey(), async function () {
+        const r = await renameNote(a.from, a.to)
+        return Object.assign({ notes: await notesView(), active: activeNote }, r)
+      })
+    })
+    handleLocked('importNote', async function (args) {
+      const a = args || {}
+      if (!bindSession(a.sessionId)) return notMine('importNote')
+      confirmed = true
+      await ensureLoaded()
+      return await withNoteLock(noteLockKey(), async function () {
+        const r = await importIntoActiveNote(a)
+        return Object.assign({ notes: await notesView(), lineCount: linesOf(S.text).length, revision: S.revision }, r)
+      })
+    })
+
+    handleLocked('state', async function (args) {
+      const callerId = args && typeof args.sessionId === 'string' ? args.sessionId : ''
+      if (!bindSession(callerId)) return { ok: false, error: 'no-session', inactive: true }
+      confirmed = true
+      await ensureLoaded()
       const rev = args && typeof args.revision === 'number' ? args.revision : -1
       if (rev === S.revision) return { unchanged: true, revision: S.revision }
       return stateView(callerId)
@@ -809,28 +1425,26 @@ return {
     function notMine(where) { return { ok: false, error: 'inactive', where: where } }
     /** Serialize every mutation of this note (see withNoteLock) under one key. */
     function noteLockKey() { return 'note:' + base }
-    harness.handle('saveText', async function (args) {
+    handleLocked('saveText', async function (args) {
       const a = args || {}
-      const moved = await adoptFromHint(a.sessionId)
-      if (moved) { await ensureLoaded(); await migrate() }
-      if (!confirmed) return notMine('saveText')
-      if (foreignCaller(a.sessionId)) return notMine('saveText')
+      if (!bindSession(a.sessionId)) return notMine('saveText')
+      confirmed = true
+      await ensureLoaded()
       return await withNoteLock(noteLockKey(), function () {
         return saveText(a.text, typeof a.baseRevision === 'number' ? a.baseRevision : undefined)
       })
     })
-    harness.handle('addSelection', async function (args) {
+    handleLocked('addSelection', async function (args) {
       const a = args || {}
-      const moved = await adoptFromHint(a.sessionId)
-      if (moved) { await ensureLoaded(); await migrate() }
-      if (!confirmed) return notMine('addSelection')
-      if (foreignCaller(a.sessionId)) return notMine('addSelection')
+      if (!bindSession(a.sessionId)) return notMine('addSelection')
+      confirmed = true
+      await ensureLoaded()
       return await withNoteLock(noteLockKey(), function () { return addSelection(a) })
     })
-    harness.handle('removeSelection', async function (args) {
+    handleLocked('removeSelection', async function (args) {
+      if (!bindSession(args && args.sessionId)) return notMine('removeSelection')
+      confirmed = true
       await ensureLoaded()
-      if (!confirmed) return notMine('removeSelection')
-      if (foreignCaller(args && args.sessionId)) return notMine('removeSelection')
       return await withNoteLock(noteLockKey(), async function () {
         const id = args && args.id ? String(args.id) : ''
         S.selections = S.selections.filter(function (s) { return s.id !== id })
@@ -839,10 +1453,10 @@ return {
         return { ok: true, revision: S.revision, selections: viewSelections() }
       })
     })
-    harness.handle('clearSelections', async function () {
+    handleLocked('clearSelections', async function () {
+      if (!bindSession(args && args.sessionId)) return notMine('clearSelections')
+      confirmed = true
       await ensureLoaded()
-      if (!confirmed) return notMine('clearSelections')
-      if (foreignCaller(args && args.sessionId)) return notMine('clearSelections')
       return await withNoteLock(noteLockKey(), async function () {
         S.selections = []
         S.revision += 1
@@ -850,15 +1464,15 @@ return {
         return { ok: true, revision: S.revision, selections: viewSelections() }
       })
     })
-    harness.handle('commit', async function (args) {
+    handleLocked('commit', async function (args) {
+      if (!bindSession(args && args.sessionId)) return notMine('commit')
+      confirmed = true
       await ensureLoaded()
-      if (!confirmed) return notMine('commit')
-      if (foreignCaller(args && args.sessionId)) return notMine('commit')
       return await withNoteLock(noteLockKey(), function () {
         return commit(args && args.message ? args.message : '')
       })
     })
-    harness.handle('asset', async function (args) {
+    handleLocked('asset', async function (args) {
       await ensureLoaded()
       const p = String((args && args.path) || '')
       if (!p) return { ok: false, error: 'empty path' }
@@ -871,7 +1485,7 @@ return {
         return { ok: true, mime: mime, size: bytes.length, dataUrl: 'data:' + mime + ';base64,' + b64(bytes) }
       } catch (err) { return { ok: false, error: (err && err.message) ? err.message : String(err) } }
     })
-    harness.handle('reload', async function () {
+    handleLocked('reload', async function () {
       await ensureLoaded()
       try {
         // Reload replaces our basis with what is on disk, so this is exactly the read
@@ -926,16 +1540,17 @@ return {
           ctx.effect(function () {
             return systemPrompt.variable('dsh_window_note_scope', function (context) {
               const sid = sessionIdOfContext(context)
-              if (!sessionId) {
-                return '归属：这张卡片还没有归属会话。若用户在本会话里提到笔记/卡片/划线，你调用任一 `note_*` 工具即由本会话接管（同一个工作区只允许一个会话拥有）。'
+              // Every session has its own note space; there is nothing to own or share.
+              // The only question that changes the instructions is whether THIS session
+              // has a note yet — a session with none must not be told to write one.
+              if (!sid) return '本会话的笔记空间：未知（拿不到会话 id）。不要调用 note_* 工具。'
+              if (sid === sessionId && activeNote) {
+                return '本会话的笔记空间：**已打开《' + activeNote + '》**（本会话共 ' + String((sessionNotes || []).length) + ' 份笔记，目录 ' + sessionRoot() + '）。下面的工作方式全部适用，包括回答前先取用户的新划线。'
               }
-              if (sid && sid === sessionId) {
-                return '归属：**本会话就是这张卡片的归属会话**。下面的工作方式全部适用，包括回答前先取用户的新划线。'
+              if (sid === sessionId) {
+                return '本会话的笔记空间：**本会话还没有笔记**。不要主动创建；只有用户明确要求记笔记时，才用 note_create 建一份。'
               }
-              if (ownerIsLive()) {
-                return '归属：这张卡片归属**另一个仍在运行的会话**，本会话没有它。**不要调用任何 `note_*` 工具**（会被拒绝，不会成功），也不要在回答里提到这张卡片。除非用户在本会话里明确要求使用/接管笔记卡片，那时再说明它被另一个会话占用。'
-              }
-              return '归属：这张卡片存在于当前工作区，但它此前归属的会话已经结束。若用户在本会话里提到笔记/卡片/划线，你调用任一 `note_*` 工具即由本会话接管；用户没提就不要碰。'
+              return '本会话的笔记空间：未加载。只有在用户明确要求记录/整理笔记、或调用 /note 之后，才用 note_list / note_create 开始。'
             })
           })
         }
@@ -992,7 +1607,7 @@ return {
     }
 
     const SEL_HIT = { type: 'object', additionalProperties: false, properties: { id: { type: 'string', required: true }, color: { type: 'string', required: true }, range: { type: 'string', required: true }, text: { type: 'string', required: true } } }
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_add_selection',
       description: '由 agent 新建一条划线（高亮）。用于标注你要用户注意、或后续要跟进的区间。color: yellow(默认) / pink / green / black(黑色是遮盖，字会被挡住)。',
       parameters: {
@@ -1014,7 +1629,7 @@ return {
         })
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_remove_selection',
       description: '删除一条划线（按 id，id 来自 note_get_selections）。',
       parameters: { id: { type: 'string', required: true, description: '划线 id，如 sel-9' } },
@@ -1034,7 +1649,7 @@ return {
         })
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_clear_selections',
       description: '清空全部划线。',
       parameters: {},
@@ -1052,7 +1667,7 @@ return {
         })
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_set_color',
       description: '修改一条划线的颜色：yellow / pink / green / black。可用它把已处理的划线转成绿色、或把要屏蔽的区间涂黑。',
       parameters: { id: { type: 'string', required: true, description: '划线 id' }, color: { type: 'string', required: true, description: 'yellow / pink / green / black' } },
@@ -1072,7 +1687,7 @@ return {
         })
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_checkpoint',
       description: '在长任务里把当前笔记状态提交一次 git 检查点，便于回溯。',
       parameters: { message: { type: 'string', description: '提交信息，省略则自动生成。' } },
@@ -1088,7 +1703,7 @@ return {
         })
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_patch',
       description: '按区间精确改写笔记的一小段，无需输出全文——这是首选的写入方式（省上下文）。行 1 基、列 0 基、列以该行原文为准，列到行尾可用 endLine 下一行:0。写入后会自动重新锚定已有划线。',
       parameters: { startLine: RANGE_PARAMS.startLine, startCol: RANGE_PARAMS.startCol, endLine: RANGE_PARAMS.endLine, endCol: RANGE_PARAMS.endCol, text: { type: 'string', description: '替换文本；空串表示删除该区间。' } },
@@ -1103,7 +1718,7 @@ return {
         })
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_patch_many',
       description: '一次改多处：给出多个区间替换，内部从后往前应用以免位置错位。适合一次处理用户划的若干条重点。',
       parameters: {
@@ -1133,7 +1748,7 @@ return {
         })
       },
     }))
-    harness.registerTool(ctx, harness.defineTool({
+    registerToolLocked(harness.defineTool({
       name: 'note_find',
       description: '在笔记里搜索子串，返回命中的行号、列号与上下文片段。用它定位「关于 X 的那段」而不必读全文，再配合 note_patch 精确改写。区分大小写。',
       parameters: { query: { type: 'string', required: true, description: '要搜索的文字' }, limit: { type: 'integer', description: '最多返回条数，默认 20，上限 100。' }, contextChars: { type: 'integer', description: '片段两侧各保留多少字符，默认 40。' } },
