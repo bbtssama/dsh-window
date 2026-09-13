@@ -643,58 +643,82 @@ sessions._m.set(SID_H, sessionWith(SID_H, WS))
     String(longSel.remark && longSel.remark.length))
 }
 
-console.log('mark styles (italic / underline next to the highlighter)')
-// A mark may draw itself in the text instead of behind it. The style rides on the same record as
-// the colour, so both travel through the same RPCs, the same state file and the same tool output.
+console.log('mark styles (colour, italic, underline — independent, all combinable)')
+// The three dimensions are independent flags on the same record: a passage can be pink AND
+// italic AND underlined at once, and the retired single `style` field still reads and writes
+// as "both flags" so an older caller keeps working.
 {
   const SID_I = 'session-style-8888'
   sessions._m.set(SID_I, sessionWith(SID_I, WS))
   const r = async (m, a) => (await rpc(m, Object.assign({ sessionId: SID_I }, a || {}))).result || {}
   await r('createNote', { name: '样式', text: '# 样式\n第一行内容\n第二行内容\n第三行内容\n' })
   const hl = await r('addSelection', { startLine: 2, startCol: 0, endLine: 2, endCol: 5 })
-  const it = await r('addSelection', { startLine: 2, startCol: 0, endLine: 2, endCol: 5, style: 'italic' })
-  const ul = await r('addSelection', { startLine: 3, startCol: 0, endLine: 3, endCol: 5, style: 'underline', color: 'pink' })
+  const it = await r('addSelection', { startLine: 2, startCol: 0, endLine: 2, endCol: 5, italic: true })
+  const ul = await r('addSelection', { startLine: 3, startCol: 0, endLine: 3, endCol: 5, underline: true, color: 'pink' })
+  const both = await r('addSelection', { startLine: 3, startCol: 0, endLine: 3, endCol: 5, italic: true, underline: true, color: 'green' })
+  const legacy = await r('addSelection', { startLine: 1, startCol: 0, endLine: 1, endCol: 3, style: 'italic' })
   const sels = (await r('state', { revision: -1 })).selections || []
   const byId = (id) => sels.find((s) => s.id === id) || {}
-  ok('a mark created without a style is a highlighter',
-    byId(hl.id).style === 'highlight', JSON.stringify({ style: byId(hl.id).style }))
-  ok('italic and underline are stored on the mark',
-    byId(it.id).style === 'italic' && byId(ul.id).style === 'underline',
-    JSON.stringify({ italic: byId(it.id).style, underline: byId(ul.id).style }))
-  ok('two marks of different styles can cover the same words',
-    byId(hl.id).startLine === byId(it.id).startLine && byId(hl.id).startCol === byId(it.id).startCol && hl.id !== it.id,
-    hl.id + ' + ' + it.id + ' over the same range')
+  ok('a mark created without any flag has no text style',
+    byId(hl.id).italic === false && byId(hl.id).underline === false,
+    JSON.stringify({ italic: byId(hl.id).italic, underline: byId(hl.id).underline }))
+  ok('italic and underline are independent flags on the mark',
+    byId(it.id).italic === true && byId(it.id).underline === false && byId(ul.id).underline === true && byId(ul.id).italic === false,
+    JSON.stringify({ it: byId(it.id), ul: byId(ul.id) }))
+  ok('BOTH flags can be set on one mark, together with a colour',
+    byId(both.id).italic === true && byId(both.id).underline === true && byId(both.id).color === 'green',
+    JSON.stringify({ italic: byId(both.id).italic, underline: byId(both.id).underline, color: byId(both.id).color }))
+  ok('the retired `style` argument still works',
+    byId(legacy.id).italic === true && byId(legacy.id).underline === false, JSON.stringify(byId(legacy.id).style))
+  ok('several marks of different looks can cover the same words',
+    byId(hl.id).startLine === byId(it.id).startLine && byId(hl.id).startCol === byId(it.id).startCol && hl.id !== it.id && ul.id !== both.id,
+    hl.id + ' + ' + it.id + ' over the same range, ' + ul.id + ' + ' + both.id + ' over another')
   const stateFile = String(files.get(k(noteDirOf(SID_I, '样式') + '/.note-state.json')) || '')
-  ok('the style is persisted to disk', /"style":\s*"italic"/.test(stateFile) && /"style":\s*"underline"/.test(stateFile), stateFile.length + ' bytes')
-  const changed = await r('setMarkLook', { id: it.id, style: 'underline' })
-  const coloured = await r('setMarkLook', { id: ul.id, color: 'black' })
-  const after = (await r('state', { revision: -1 })).selections || []
-  const afterById = (id) => after.find((s) => s.id === id) || {}
-  ok('setMarkLook changes the style', changed.ok === true && afterById(it.id).style === 'underline',
-    JSON.stringify({ ok: changed.ok, style: afterById(it.id).style }))
-  ok('setMarkLook changes the colour', coloured.ok === true && afterById(ul.id).color === 'black' && afterById(ul.id).style === 'underline',
-    JSON.stringify({ color: afterById(ul.id).color, style: afterById(ul.id).style }))
-  ok('a colour change from the function card keeps the style, and vice versa',
-    afterById(hl.id).style === 'highlight' && (await r('setMarkLook', { id: hl.id, color: 'green' })).ok === true && ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === hl.id).style === 'highlight',
-    'rule holds both ways')
+  ok('the flags are persisted to disk',
+    /"italic":\s*true/.test(stateFile) && /"underline":\s*true/.test(stateFile) && !/"style":/.test(stateFile),
+    stateFile.length + ' bytes')
+  // Toggling one flag must leave the other alone — that is what a single I / U button does.
+  const toggledIt = await r('setMarkLook', { id: both.id, italic: false })
+  const afterToggle = (await r('state', { revision: -1 })).selections || []
+  const t = afterToggle.find((s) => s.id === both.id) || {}
+  ok('toggling one style leaves the other one alone',
+    toggledIt.ok === true && t.italic === false && t.underline === true && t.color === 'green' && t.style === 'underline',
+    JSON.stringify({ style: t.style, italic: t.italic, underline: t.underline }))
+  const coloured = await r('setMarkLook', { id: both.id, color: 'black' })
+  const afterColour = ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === both.id) || {}
+  ok('a colour change keeps the text styles',
+    coloured.ok === true && afterColour.color === 'black' && afterColour.underline === true,
+    JSON.stringify({ color: afterColour.color, style: afterColour.style }))
+  ok('a colour of `none` means no wash at all',
+    (await r('setMarkLook', { id: hl.id, color: 'none' })).ok === true && ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === hl.id).color === 'none',
+    'none accepted')
+  const resetLegacy = await r('setMarkLook', { id: both.id, style: 'highlight' })
+  const afterReset = ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === both.id) || {}
+  ok('the legacy `style: highlight` clears both flags',
+    resetLegacy.ok === true && afterReset.italic === false && afterReset.underline === false,
+    JSON.stringify({ style: afterReset.style }))
   const badStyle = await r('setMarkLook', { id: hl.id, style: 'sparkle' })
   const badColor = await r('setMarkLook', { id: hl.id, color: 'chartreuse' })
   const none = await r('setMarkLook', { id: hl.id })
   ok('an invalid style or colour is refused, not silently coerced',
     badStyle.ok === false && badColor.ok === false && none.ok === false,
     JSON.stringify({ style: badStyle.error, color: badColor.error, neither: none.error }))
-  const ghost = await r('setMarkLook', { id: 'sel-nope', style: 'italic' })
+  const ghost = await r('setMarkLook', { id: 'sel-nope', italic: true })
   ok('a style change for a mark that does not exist is refused',
     ghost.ok === false && /没有这条标记记录/.test(String(ghost.error)), JSON.stringify({ error: ghost.error }))
   const all = await r('allMarks', {})
   const group = (all.notes || []).find((g) => g.note === '样式') || {}
-  const anyStyle = (group.marks || []).some((m) => m.style === 'underline')
-  ok('the session view carries the style too', anyStyle === true, JSON.stringify((group.marks || []).map((m) => m.id + ':' + m.style)))
-  const styled = await asTool('note_set_style', { id: hl.id, style: 'italic' }, SID_I)
-  ok('note_set_style is a first-class tool', styled.style === 'italic' && styled.ok === true, JSON.stringify({ ok: styled.ok, style: styled.style }))
-  const addedStyled = await asTool('note_add_selection', { startLine: 4, startCol: 0, endLine: 4, endCol: 5, style: 'underline' }, SID_I)
+  const anyStyle = (group.marks || []).some((m) => m.italic === true || m.underline === true)
+  ok('the session view carries the flags too', anyStyle === true, JSON.stringify((group.marks || []).map((m) => m.id + ':' + m.style)))
+  const styled = await asTool('note_set_style', { id: hl.id, italic: true }, SID_I)
+  ok('note_set_style toggles one flag', styled.style === 'italic' && styled.italic === true && styled.underline === false && styled.ok === true, JSON.stringify({ ok: styled.ok, style: styled.style }))
+  const styledBoth = await asTool('note_set_style', { id: hl.id, style: 'both' }, SID_I)
+  ok('note_set_style still accepts the legacy single value', styledBoth.style === 'italic+underline' && styledBoth.italic === true && styledBoth.underline === true, JSON.stringify({ style: styledBoth.style }))
+  const addedStyled = await asTool('note_add_selection', { startLine: 4, startCol: 0, endLine: 4, endCol: 5, italic: true, underline: true, color: 'pink' }, SID_I)
   const madeStyle = ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === addedStyled.id) || {}
-  ok('note_add_selection can create a styled mark directly', madeStyle.style === 'underline', JSON.stringify({ style: madeStyle.style }))
+  ok('note_add_selection can create a fully combined mark directly',
+    madeStyle.italic === true && madeStyle.underline === true && madeStyle.color === 'pink',
+    JSON.stringify({ style: madeStyle.style, color: madeStyle.color }))
   const tool = tools.get('note_get_selections')
   const rendered = tool.output.render({}, await asTool('note_get_selections', {}, SID_I)).map((p) => p.text).join('\n')
   ok('the model is told which mark is italic and which is underlined',

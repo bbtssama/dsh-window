@@ -26,13 +26,30 @@ const MAX_NAME_LEN = 48
 const MAX_IMPORT_BYTES = 8 * 1024 * 1024
 // Highlight colour a selection carries. Agent-visible enum; the client paints it
 // as an overlay behind the text, so overlapping ranges simply blend.
-const COLORS = { yellow: 1, pink: 1, green: 1, black: 1 }
+const COLORS = { yellow: 1, pink: 1, green: 1, black: 1, none: 1 }
 /**
- * How a mark is drawn. `highlight` is the classic translucent wash over the text; the two
- * others mark a passage *in the text itself* (italic / underlined glyphs) instead of behind
- * it, so one passage can carry two different intentions without a second colour.
+ * How a mark draws itself. The colour is the wash behind the text (`none` = no wash at all),
+ * and the two text styles change the glyphs themselves. They are INDEPENDENT flags, not one
+ * choice: a passage can be pink AND italic AND underlined at once. The retired single `style`
+ * field (highlight / italic / underline) is migrated into the two flags on read.
  */
-const STYLES = { highlight: 1, italic: 1, underline: 1 }
+const STYLES = { highlight: 1, italic: 1, underline: 1, both: 1, 'italic+underline': 1 }
+/** Read the two flags out of a record that may still carry the retired single `style` field. */
+function lookFlags(raw) {
+  const legacy = raw && typeof raw.style === 'string' ? raw.style : ''
+  const both = legacy === 'both' || legacy === 'italic+underline'
+  return {
+    italic: (raw && raw.italic === true) || legacy === 'italic' || both,
+    underline: (raw && raw.underline === true) || legacy === 'underline' || both,
+  }
+}
+/** The retired single field, derived, so an older reader still understands the mark. */
+function styleLabel(italic, underline) {
+  if (italic && underline) return 'italic+underline'
+  if (italic) return 'italic'
+  if (underline) return 'underline'
+  return 'highlight'
+}
 const SEED_TEXT = '# 我的知识笔记\n\n> 在对话里向 DeepSeek 提知识性问题，讲解会自动写进这份笔记。\n> 在卡片里长按文本可以「选中」重点，选中的内容会以荧光标出并同步给 AI。\n'
 const SECTION_NAME = 'dsh-window'
 const B64T = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
@@ -108,7 +125,8 @@ function normalizeSel(raw) {
     fetched: raw.fetched === true,
     stale: raw.stale === true,
     color: COLORS[raw.color] ? raw.color : 'yellow',
-    style: STYLES[raw.style] ? raw.style : 'highlight',
+    italic: lookFlags(raw).italic,
+    underline: lookFlags(raw).underline,
     // A remark the reader typed about this passage ("this is the part I keep forgetting",
     // "ask about this in the interview"). Free text, delivered to the agent together with
     // the selection: it is the one field that carries the user's own words.
@@ -822,7 +840,8 @@ return {
       const out = []
       for (let i = 0; i < S.selections.length; i++) {
         const s = S.selections[i]
-        out.push({ id: s.id, order: i + 1, seq: s.seq, text: s.text, startLine: s.startLine, startCol: s.startCol, endLine: s.endLine, endCol: s.endCol, createdAt: s.createdAt, color: s.color || 'yellow', style: s.style || 'highlight', fetched: s.fetched === true, stale: s.stale === true, remark: s.remark || '' })
+        const look = lookFlags(s)
+        out.push({ id: s.id, order: i + 1, seq: s.seq, text: s.text, startLine: s.startLine, startCol: s.startCol, endLine: s.endLine, endCol: s.endCol, createdAt: s.createdAt, color: s.color || 'yellow', italic: look.italic, underline: look.underline, style: styleLabel(look.italic, look.underline), fetched: s.fetched === true, stale: s.stale === true, remark: s.remark || '' })
       }
       return out
     }
@@ -935,7 +954,7 @@ return {
       const text = sliceRange(S.text, { startLine: first.line, startCol: first.col, endLine: last.line, endCol: last.col })
       if (text.trim() === '') return { ok: false, reason: 'empty', revision: S.revision, selections: viewSelections() }
       S.seq += 1
-      const sel = { id: 'sel-' + S.seq, seq: S.seq, startLine: first.line, startCol: first.col, endLine: last.line, endCol: last.col, text: text, createdAt: isoNow(), color: COLORS[a.color] ? a.color : 'yellow', style: STYLES[a.style] ? a.style : 'highlight', fetched: false, stale: false, remark: cleanRemark(a.remark) }
+      const sel = { id: 'sel-' + S.seq, seq: S.seq, startLine: first.line, startCol: first.col, endLine: last.line, endCol: last.col, text: text, createdAt: isoNow(), color: COLORS[a.color] ? a.color : 'yellow', italic: lookFlags(a).italic, underline: lookFlags(a).underline, fetched: false, stale: false, remark: cleanRemark(a.remark) }
       S.selections = sortSelections(S.selections.concat([sel]))
       S.revision += 1
       try { await persistState() } catch (err) { fail('写入选中记录', err) }
@@ -946,38 +965,58 @@ return {
      * user already selected, so this is a targeted update rather than a new selection.
      */
     /**
-     * Change how one existing mark is drawn — its colour, its style, or both. The colour
-     * palette and the italic/underline styles are two dimensions of the same mark, so one
-     * targeted update covers every button on the reader's function card. An empty string
-     * means "leave this dimension alone"; a value that is not in the table is refused rather
-     * than silently coerced, because a wrong colour is worse than a refusal.
+     * Change how one existing mark is drawn — its colour, its italic flag, its underline flag,
+     * any combination. The three are independent dimensions of the same mark, so one targeted
+     * update covers every button on the reader's function card. A missing/undefined field means
+     * "leave this dimension alone" (that is how a single toggle button works), while a value
+     * that is not in the table is refused rather than silently coerced.
      */
-    async function setMarkLook(id, color, style) {
+    async function setMarkLook(id, patch) {
       await ensureLoaded()
       const want = String(id || '')
-      const hasColor = color !== undefined && color !== null && color !== ''
-      const hasStyle = style !== undefined && style !== null && style !== ''
-      if (!hasColor && !hasStyle) return { ok: false, found: false, error: 'color 和 style 至少要给一个', revision: S.revision, selections: viewSelections() }
-      const wantColor = hasColor ? (COLORS[color] ? color : '') : ''
-      const wantStyle = hasStyle ? (STYLES[style] ? style : '') : ''
-      if ((hasColor && wantColor === '') || (hasStyle && wantStyle === '')) {
-        return { ok: false, found: false, error: 'color 只能是 yellow/pink/green/black，style 只能是 highlight/italic/underline', revision: S.revision, selections: viewSelections() }
+      const p = patch && typeof patch === 'object' ? patch : {}
+      const hasColor = p.color !== undefined && p.color !== null && p.color !== ''
+      const hasItalic = p.italic === true || p.italic === false
+      const hasUnderline = p.underline === true || p.underline === false
+      // The retired single field still arrives from an older client (or the note_set_style tool).
+      const legacy = typeof p.style === 'string' && p.style !== '' ? p.style : ''
+      const legacyFlags = legacy === '' ? null : lookFlags({ style: legacy })
+      const hasLegacy = legacyFlags !== null
+      if (!hasColor && !hasItalic && !hasUnderline && !hasLegacy) {
+        return { ok: false, found: false, error: '至少要给一个 color / italic / underline', revision: S.revision, selections: viewSelections() }
+      }
+      if (hasColor && !COLORS[p.color]) {
+        return { ok: false, found: false, error: 'color 只能是 yellow/pink/green/black/none', revision: S.revision, selections: viewSelections() }
+      }
+      if (hasLegacy && !STYLES[legacy]) {
+        return { ok: false, found: false, error: 'style 只能是 highlight/italic/underline/both', revision: S.revision, selections: viewSelections() }
       }
       let found = false
       let outColor = ''
-      let outStyle = ''
+      let outItalic = false
+      let outUnderline = false
       for (let i = 0; i < S.selections.length; i++) {
         const s = S.selections[i]
         if (s.id !== want) continue
         found = true
-        if (wantColor !== '' && (s.color || 'yellow') !== wantColor) { s.color = wantColor; S.revision += 1 }
-        if (wantStyle !== '' && (s.style || 'highlight') !== wantStyle) { s.style = wantStyle; S.revision += 1 }
+        if (hasColor && (s.color || 'yellow') !== p.color) { s.color = p.color; S.revision += 1 }
+        const now = lookFlags(s)
+        let nextItalic = hasItalic ? p.italic === true : now.italic
+        let nextUnderline = hasUnderline ? p.underline === true : now.underline
+        // A legacy `style` is an assignment of BOTH flags, which is how a caller clears them
+        // again (`style: 'highlight'`).
+        if (hasLegacy) { nextItalic = legacyFlags.italic; nextUnderline = legacyFlags.underline }
+        if (nextItalic !== now.italic) { s.italic = nextItalic; S.revision += 1 }
+        if (nextUnderline !== now.underline) { s.underline = nextUnderline; S.revision += 1 }
+        // The retired field never survives a write: the flags are the truth from here on.
+        if (s.style !== undefined) delete s.style
         outColor = s.color || 'yellow'
-        outStyle = s.style || 'highlight'
+        outItalic = nextItalic
+        outUnderline = nextUnderline
       }
       if (!found) return { ok: false, found: false, error: '没有这条标记记录: ' + want, revision: S.revision, selections: viewSelections() }
       try { await persistState() } catch (err) { fail('写入标记记录', err) }
-      return { ok: true, found: true, id: want, color: outColor, style: outStyle, revision: S.revision, selections: viewSelections() }
+      return { ok: true, found: true, id: want, color: outColor, italic: outItalic, underline: outUnderline, style: styleLabel(outItalic, outUnderline), revision: S.revision, selections: viewSelections() }
     }
     async function setRemark(id, raw) {
       await ensureLoaded()
@@ -1117,7 +1156,8 @@ return {
         // The colour is part of the message the agent receives: it is the intent
         // channel (yellow focus / pink question / green done / black masked), so it
         // has to appear in the text render, not only in the stored object.
-        const head = '#' + s.order + ' [' + s.id + '] ' + ({ yellow: '黄', pink: '粉', green: '绿', black: '黑' }[s.color] || '黄') + ({ italic: '·斜体', underline: '·下划线' }[s.style] || '') + ' 第' + s.startLine + '行:' + s.startCol + ' → 第' + s.endLine + '行:' + s.endCol + (s.fetched ? ' （已取用）' : ' （新标记）') + (s.stale ? ' [!]原文已变动' : '')
+        const flags = lookFlags(s)
+        const head = '#' + s.order + ' [' + s.id + '] ' + ({ yellow: '黄', pink: '粉', green: '绿', black: '黑', none: '无色' }[s.color] || '黄') + (flags.italic ? '·斜体' : '') + (flags.underline ? '·下划线' : '') + ' 第' + s.startLine + '行:' + s.startCol + ' → 第' + s.endLine + '行:' + s.endCol + (s.fetched ? ' （已取用）' : ' （新标记）') + (s.stale ? ' [!]原文已变动' : '')
         // The remark is the user's own words about this passage, so it travels with the
         // selection text into every prompt — that is the whole point of the field.
         const remark = typeof s.remark === 'string' && s.remark !== '' ? '\n  【备注】' + s.remark.split('\n').join('\n  ') : ''
@@ -1148,8 +1188,10 @@ return {
         createdAt: { type: 'string', required: true }, fetched: { type: 'boolean', required: true },
         stale: { type: 'boolean', required: true }, text: { type: 'string', required: true },
         color: { type: 'string', required: true },
-        // How the mark is drawn: highlight (translucent wash) / italic / underline. Always
-        // present, so a caller can branch on it without checking for the field.
+        // The two text styles are independent flags, so a mark can carry colour + italic +
+        // underline at once. `style` stays as the derived single-word summary for readability.
+        italic: { type: 'boolean', required: true },
+        underline: { type: 'boolean', required: true },
         style: { type: 'string', required: true },
         // The reader's own note about this passage. Always present (empty string when there
         // is none) so the agent never has to guess whether the field exists.
@@ -1917,8 +1959,8 @@ return {
       confirmed = true
       await ensureLoaded()
       return await withNoteLock(noteLockKey(), async function () {
-        const r = await setMarkLook(args && args.id, args && args.color, args && args.style)
-        return { ok: r.ok === true, found: r.found === true, id: String((args && args.id) || ''), color: typeof r.color === 'string' ? r.color : '', style: typeof r.style === 'string' ? r.style : '', revision: r.revision, selections: r.selections, error: r.ok ? '' : String(r.error || '') }
+        const r = await setMarkLook(args && args.id, args || {})
+        return { ok: r.ok === true, found: r.found === true, id: String((args && args.id) || ''), color: typeof r.color === 'string' ? r.color : '', italic: r.italic === true, underline: r.underline === true, style: typeof r.style === 'string' ? r.style : '', revision: r.revision, selections: r.selections, error: r.ok ? '' : String(r.error || '') }
       })
     })
     // Where the reader is, so switching notes (or coming back tomorrow) resumes in place.    // Deliberately NOT part of the guarded selection state and not a revision bump: it is
@@ -2113,10 +2155,12 @@ return {
 
     // ── 协同工具：精确写入 / 搜索 / 标记管理 ────────────────────────────────
     // 全部复用上面的 helper，所以位置换算、重新锚定、落盘与 git 语义完全一致。
-    const COLOR_SET = { yellow: 1, pink: 1, green: 1, black: 1 }
+    const COLOR_SET = { yellow: 1, pink: 1, green: 1, black: 1, none: 1 }
     function colorOf(v) { return COLOR_SET[v] ? v : 'yellow' }
-    const STYLE_SET = { highlight: 1, italic: 1, underline: 1 }
+    const STYLE_SET = { highlight: 1, italic: 1, underline: 1, both: 1, 'italic+underline': 1 }
     function styleOf(v) { return STYLE_SET[v] ? v : 'highlight' }
+    /** The two flags a legacy `style` string asks for (used by the tool surfaces only). */
+    function styleWants(v) { return lookFlags({ style: styleOf(v) }) }
 
     /** 应用一处区间替换；行/列越界会被夹到有效范围。 */
     function applyPatch(p) {
@@ -2165,14 +2209,16 @@ return {
     const SEL_HIT = { type: 'object', additionalProperties: false, properties: { id: { type: 'string', required: true }, color: { type: 'string', required: true }, range: { type: 'string', required: true }, text: { type: 'string', required: true } } }
     registerToolLocked(harness.defineTool({
       name: 'note_add_selection',
-      description: '由 agent 新建一个标记。用于标注你要用户注意、或后续要跟进的区间。remark 可写这段的备注（会随选中对象一起给到 llm，也是用户长按标记能填的那个字段）。color: yellow(默认) / pink / green / black(黑色是遮盖，字会被挡住)；style: highlight(默认，荧光底色) / italic(斜体) / underline(下划线)，后两者直接改文字本身，同一段文字可以既有底色标记又有斜体标记。',
+      description: '由 agent 新建一个标记。用于标注你要用户注意、或后续要跟进的区间。remark 可写这段的备注（会随标记一起给到 llm，也是用户长按标记能填的那个字段）。color: yellow(默认) / pink / green / black(黑色是遮盖，字会被挡住) / none(完全不铺底色)；italic 与 underline 是**独立的两个开关**，可以和任意颜色同时使用（例如黄底 + 斜体 + 下划线）。',
       parameters: {
         startLine: { type: 'integer', required: true, description: '起始行（1 基）' },
         startCol: { type: 'integer', required: true, description: '起始列（0 基）' },
         endLine: { type: 'integer', required: true, description: '结束行（1 基，含）' },
         endCol: { type: 'integer', required: true, description: '结束列（0 基，不含）' },
-        color: { type: 'string', description: 'yellow / pink / green / black，默认 yellow。' },
-        style: { type: 'string', description: 'highlight（默认，荧光底色）/ italic（斜体）/ underline（下划线）。' },
+        color: { type: 'string', description: 'yellow / pink / green / black / none（none = 不铺底色），默认 yellow。' },
+        italic: { type: 'boolean', description: '把这段字改成斜体（可与颜色、下划线同时使用）。' },
+        underline: { type: 'boolean', description: '给这段字加下划线（可与颜色、斜体同时使用）。' },
+        style: { type: 'string', description: '（旧写法）highlight / italic / underline / both，等价于设置这两个开关。' },
         remark: { type: 'string', description: '这条标记的备注（可空）。用户自己写的备注也在这个字段里。' },
       },
       output: {
@@ -2182,7 +2228,8 @@ return {
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_add_selection', exec); markTouched()
-        const r = await addSelection(Object.assign({}, args || {}, { color: colorOf((args || {}).color), style: styleOf((args || {}).style) }))
+        const a = args || {}
+        const r = await addSelection(Object.assign({}, a, { color: colorOf(a.color), italic: a.italic === true || styleWants(a.style).italic, underline: a.underline === true || styleWants(a.style).underline }))
         return { ok: r.ok === true, id: r.ok ? r.id : '', revision: S.revision, reason: r.ok ? '' : String(r.reason || ''), selections: selRender(viewSelections()) }
         })
       },
@@ -2247,19 +2294,27 @@ return {
     }))
     registerToolLocked(harness.defineTool({
       name: 'note_set_style',
-      description: '改变一个标记的绘制方式：highlight(荧光底色，默认) / italic(斜体) / underline(下划线)。斜体和下划线直接作用在文字本身，适合"这句要背下来""这里是我错了"这类不需要抢注意力的标注；同一段文字可以同时有一条底色标记和一条斜体标记。',
-      parameters: { id: { type: 'string', required: true, description: '标记 id' }, style: { type: 'string', required: true, description: 'highlight / italic / underline' } },
+      description: '改变一个标记在文字上的样式（斜体 / 下划线），和颜色互不干扰、可以同时存在。给 italic / underline 就单独开关那一个（另一个保持不动），给 style 则两个一起设：highlight（都不加，默认）/ italic / underline / both。适合"这句要背下来""这里是我错了"这类不需要抢注意力的标注。',
+      parameters: {
+        id: { type: 'string', required: true, description: '标记 id' },
+        italic: { type: 'boolean', description: '是否斜体（省略则不改这一项）。' },
+        underline: { type: 'boolean', description: '是否下划线（省略则不改这一项）。' },
+        style: { type: 'string', description: '（旧写法）highlight / italic / underline / both —— 一次设定两个开关。' },
+      },
       output: {
-        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, found: { type: 'boolean', required: true }, style: { type: 'string', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true } } },
-        render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.found ? ('已把 ' + a.id + ' 改为 ' + v.style) : ('未找到 ' + a.id)) : '失败') + ' (rev ' + v.revision + ')\n\n' + v.selections }] },
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, found: { type: 'boolean', required: true }, style: { type: 'string', required: true }, italic: { type: 'boolean', required: true }, underline: { type: 'boolean', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.found ? ('已把 ' + a.id + ' 的样式改为 ' + v.style + '（斜体=' + (v.italic ? '开' : '关') + ' 下划线=' + (v.underline ? '开' : '关') + '）') : ('未找到 ' + a.id)) : '失败') + ' (rev ' + v.revision + ')\n\n' + v.selections }] },
       },
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_set_style', exec); markTouched()
         const a = args || {}
-        const want = styleOf(a.style)
-        const r = await setMarkLook(a.id, '', want)
-        return { ok: r.ok === true, found: r.found === true, style: want, revision: S.revision, selections: selRender(viewSelections()) }
+        const patch = {}
+        if (a.italic === true || a.italic === false) patch.italic = a.italic
+        if (a.underline === true || a.underline === false) patch.underline = a.underline
+        if (typeof a.style === 'string' && a.style !== '') patch.style = a.style
+        const r = await setMarkLook(a.id, patch)
+        return { ok: r.ok === true, found: r.found === true, style: typeof r.style === 'string' ? r.style : '', italic: r.italic === true, underline: r.underline === true, revision: S.revision, selections: selRender(viewSelections()) }
         })
       },
     }))

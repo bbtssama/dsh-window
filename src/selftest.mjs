@@ -425,31 +425,40 @@ console.log('client render: marks that live in the text')
     }
     return ''
   }
-  const fns = ['markStyle', 'textStyleRuns', 'textStyleSegments'].map(extract)
+  const fns = ['markLook', 'textStyleRuns', 'textStyleSegments'].map(extract)
   ok('the style renderer is present in the shipped client',
     fns.every((f) => f.length > 40) && src.indexOf('data-mkid') > 0 && src.indexOf("'.dn-mki{font-style:italic;}'") > 0,
     fns.map((f) => f.length).join('/') + ' chars extracted')
   let api = null
   try {
-    api = eval('(function(){' + fns.join('\n') + '\nreturn { markStyle: markStyle, textStyleRuns: textStyleRuns, textStyleSegments: textStyleSegments }})()')
+    api = eval('(function(){' + fns.join('\n') + '\nreturn { markLook: markLook, textStyleRuns: textStyleRuns, textStyleSegments: textStyleSegments }})()')
   } catch (err) { api = null }
   ok('the style helpers evaluate standalone', api !== null, api === null ? 'eval failed' : 'ok')
   if (api !== null) {
-    const { markStyle, textStyleRuns, textStyleSegments } = api
-    ok('a mark without a style is a highlighter', markStyle({}) === 'highlight' && markStyle({ style: 'junk' }) === 'highlight',
-      JSON.stringify([markStyle({}), markStyle({ style: 'junk' })]))
+    const { markLook, textStyleRuns, textStyleSegments } = api
+    // The three dimensions are independent: a plain mark has no text styles, a legacy `style`
+    // field still describes one, and the two flags win when they are present.
+    ok('a mark with no flags carries no text style',
+      markLook({}).italic === false && markLook({}).underline === false && markLook({ style: 'junk' }).italic === false,
+      JSON.stringify([markLook({}), markLook({ style: 'junk' })]))
+    ok('the retired single style field still describes a mark',
+      markLook({ style: 'italic' }).italic === true && markLook({ style: 'underline' }).underline === true && markLook({ style: 'both' }).italic === true && markLook({ style: 'both' }).underline === true,
+      JSON.stringify([markLook({ style: 'italic' }), markLook({ style: 'both' })]))
+    ok('the two flags are read independently and can both be on',
+      markLook({ italic: true, underline: false }).italic === true && markLook({ italic: true, underline: false }).underline === false && markLook({ italic: true, underline: true }).underline === true,
+      JSON.stringify([markLook({ italic: true }), markLook({ italic: true, underline: true })]))
     const sels = [
-      { id: 'a', style: 'italic', startLine: 2, startCol: 3, endLine: 2, endCol: 8 },
-      { id: 'b', style: 'underline', startLine: 2, startCol: 6, endLine: 4, endCol: 2 },
-      { id: 'c', style: 'highlight', startLine: 2, startCol: 0, endLine: 2, endCol: 40 },
+      { id: 'a', italic: true, startLine: 2, startCol: 3, endLine: 2, endCol: 8 },
+      { id: 'b', underline: true, startLine: 2, startCol: 6, endLine: 4, endCol: 2 },
+      { id: 'c', italic: true, underline: true, startLine: 2, startCol: 0, endLine: 2, endCol: 2 },
     ]
     const runs = textStyleRuns(sels)
-    ok('only the text styles become runs, and they are keyed by line',
-      Object.keys(runs.byLine).join(',') === '2,3,4' && runs.byLine[2].length === 2 && runs.byLine[3].length === 1,
+    ok('one run per flag, keyed by line',
+      Object.keys(runs.byLine).join(',') === '2,3,4' && runs.byLine[2].length === 4 && runs.byLine[3].length === 1,
       JSON.stringify({ lines: Object.keys(runs.byLine), per: runs.byLine[2].length }))
-    const seg = textStyleSegments(runs.byLine[2], 0, 12)
-    ok('a covered span is split at the run boundaries',
-      seg !== null && seg.map((s) => s.off + '+' + s.len + ':' + s.styles.join('&')).join(' ') === '0+3: 3+3:italic 6+2:italic&underline 8+4:underline',
+    const seg = textStyleSegments(runs.byLine[2], 3, 5)
+    ok('a span is split at the run boundaries, and one mark can stack both styles',
+      seg !== null && seg.map((s) => s.off + '+' + s.len + ':' + s.styles.join('&')).join(' ') === '0+3:italic 3+2:italic&underline',
       seg === null ? 'null' : seg.map((s) => s.off + '+' + s.len + ':' + s.styles.join('&')).join(' '))
     ok('overlapping marks of different styles stack on the same characters',
       textStyleSegments(runs.byLine[2], 6, 2).every((s) => s.styles.length === 2 && s.ids.length === 2),
