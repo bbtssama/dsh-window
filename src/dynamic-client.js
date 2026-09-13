@@ -696,11 +696,6 @@ return {
       const [geoVer, setGeoVer] = React.useState(0)
       const [notes, setNotes] = React.useState([])
       const [noteName, setNoteName] = React.useState('')
-      // Whether the HOST we are talking to knows about note spaces. The storage redesign
-      // is host-plane, so until dsh restarts the panel must not claim "本会话还没有笔记"
-      // while an older host is still serving one shared note — it degrades to the previous
-      // single-note card instead.
-      const [notesApi, setNotesApi] = React.useState(false)
       const [noteModal, setNoteModal] = React.useState(null)
       const [noteDrag, setNoteDrag] = React.useState(false)
       const [bounds, setBounds] = React.useState(function () { try { return { w: window.innerWidth, h: window.innerHeight } } catch (err) { return { w: 1280, h: 800 } } })
@@ -850,7 +845,9 @@ return {
         if (!toast) return undefined
         return ctx.timeout(function () { setToast('') }, 3200)
       }, [toast])
-      const visible = !!st && !hidden && !(st.sessionId && shownSessionId && st.sessionId !== shownSessionId)
+      // A session with no note shows no card at all: the note space is per session and
+      // starts empty, and /window-note (or note_create) is the explicit way to begin.
+      const visible = !!st && !hidden && notes.length > 0
       const shouldYield = visible && !geo.compact && geo.mode === 'docked'
       React.useEffect(function () {
         let root = null
@@ -998,21 +995,52 @@ return {
       // anything past the last box clamps to the line end instead of flipping
       // back to an earlier span — that heuristic caused both the flicker in
       // empty areas and the backwards jump when moving right.
+      // Line-element bands in CONTENT coordinates, measured once per geometry version.
+      //
+      // pointToPos() runs on every throttled pointer move, and it used to call
+      // getBoundingClientRect() on every line element — ~1400 layout-forcing reads per
+      // frame on a long note, which is what made dragging feel sluggish there. The bands
+      // only change when the geometry does (bump(): scroll, resize, width, re-render), so
+      // they are cached against the same version counter cellsOf uses.
+      const bandsRef = React.useRef({ key: '', bands: [], byLine: {} })
+      function lineBands() {
+        const cache = bandsRef.current
+        const key = geoVer + '|' + Math.round(geo.width) + '|' + geo.mode + '|' + (geo.compact ? 1 : 0)
+        if (cache.key === key) return cache
+        // Called from the render path, so it can run before the body ref is attached (the
+        // first paint). Measuring then is impossible and unnecessary: return an empty set
+        // WITHOUT caching it, and the mount effect's bump() re-renders with real bands.
+        const host = bodyRef.current
+        if (!host) return { key: cache.key, bands: [], byLine: {} }
+        const o = bodyOrigin()
+        const bands = []
+        const byLine = {}
+        const keys = Object.keys(lineEls.current)
+        for (let i = 0; i < keys.length; i++) {
+          const line = Number(keys[i])
+          const el = lineEls.current[keys[i]]
+          if (!el || !el.isConnected) continue
+          const r = el.getBoundingClientRect()
+          if (r.height <= 0) continue
+          bands.push({ line: line, top: r.top - o.top, bottom: r.bottom - o.top })
+          byLine[line] = bands[bands.length - 1]
+        }
+        cache.key = key
+        cache.bands = bands
+        cache.byLine = byLine
+        return cache
+      }
       function pointToPos(clientX, clientY) {
         const body = bodyRef.current
         if (!body) return null
         const o = bodyOrigin()
         const x = clientX - o.left, y = clientY - o.top
         let pick = null, pickScore = 1e12
-        const keys = Object.keys(lineEls.current)
-        for (let i = 0; i < keys.length; i++) {
-          const el = lineEls.current[keys[i]]
-          if (!el || !el.isConnected) continue
-          const r = el.getBoundingClientRect()
-          if (r.height <= 0) continue
-          const top = r.top - o.top, bottom = r.bottom - o.top
-          const score = (y >= top && y <= bottom) ? (-1 - 1 / (1 + (bottom - top))) : (y < top ? (top - y) : (y - bottom))
-          if (score < pickScore) { pickScore = score; pick = Number(keys[i]) }
+        const bands = lineBands().bands
+        for (let i = 0; i < bands.length; i++) {
+          const b = bands[i]
+          const score = (y >= b.top && y <= b.bottom) ? (-1 - 1 / (1 + (b.bottom - b.top))) : (y < b.top ? (b.top - y) : (y - b.bottom))
+          if (score < pickScore) { pickScore = score; pick = b.line }
         }
         if (pick === null) return null
         // Dead space (gaps between blocks, the body's bottom padding) must not
@@ -1736,8 +1764,27 @@ return {
           }
         }
         const keys = Object.keys(byLine)
+        // Only lines that can actually be seen need measuring: cellsOf() measures every
+        // character of a line with a Range on first use, and during a drag across a long
+        // note that cost was paid for the whole document even though the body clips
+        // everything outside its window. Skipping them changes nothing visually — the
+        // overlays would be clipped away — and keeps a drag responsive on big notes.
+        const visHost = bodyRef.current
+        const visTop = visHost ? visHost.scrollTop - 40 : -Infinity
+        const visBottom = visHost ? visHost.scrollTop + visHost.clientHeight + 40 : Infinity
+        const bands = lineBands().byLine
         for (let i = 0; i < keys.length; i++) {
           const ln = Number(keys[i])
+          const band = bands[ln]
+          if (band) {
+            if (band.bottom < visTop || band.top > visBottom) continue
+          } else {
+            // No band yet (never rendered): measure only if it is anywhere near the view.
+            const el = lineEls.current[ln]
+            if (!el || !el.isConnected) continue
+            const rec = cellsOf(ln)
+            if (rec.rect && (rec.rect.bottom < visTop || rec.rect.top > visBottom)) continue
+          }
           const rects = highlightRects(ln, byLine[ln])
           const lineElForClip = lineEls.current[ln]
           const wrapForClip = lineElForClip && lineElForClip.closest ? lineElForClip.closest('[data-dn-table]') : null
@@ -1900,7 +1947,6 @@ return {
       // panel is the only place that creates, switches, imports, clears or deletes notes.
       function applyNotes(r) {
         if (!r) return
-        setNotesApi('notes' in r)
         if (Array.isArray(r.notes)) setNotes(r.notes)
         if (typeof r.active === 'string') setNoteName(r.active)
       }
@@ -1912,17 +1958,35 @@ return {
       }
       function switchNote(name) {
         if (!name || name === noteName) return
-        setBusy('切换中')
-        host.call('selectNote', { sessionId: sidRef.current, name: name }).then(function (r) {
-          setBusy('')
-          if (r && r.ok) {
-            applyState(r)
-            setNoteName(name)
-            notify('已打开《' + name + '》')
-            return refreshNotes()
-          }
-          notify((r && r.error) || '切换失败')
-        }).catch(function (err) { setBusy(''); notify('切换失败: ' + err.message) })
+        // Everything the selection UI holds belongs to the note being LEFT: a live (blue)
+        // selection, its action bar, the magnifier and an open block editor are all
+        // meaningless on the note we switch to. They used to survive the switch — exactly
+        // the kind of state that was designed when a session had a single note.
+        setLive(null); setMagnify(null); hideBar()
+        editBlockRef.current = null; setEditBlock(null)
+        setPanel(false)
+        const go = function () {
+          setBusy('切换中')
+          host.call('selectNote', { sessionId: sidRef.current, name: name }).then(function (r) {
+            setBusy('')
+            if (r && r.ok) {
+              applyState(r)
+              setNoteName(r.active || name)
+              draftRef.current = r.text || ''
+              setDraft(r.text || '')
+              setDirty(false); dirtyRef.current = false
+              if (mode === 'edit') setMode('read')
+              if (bodyRef.current) bodyRef.current.scrollTop = 0
+              bump()
+              notify('已打开《' + (r.active || name) + '》')
+              return refreshNotes()
+            }
+            notify((r && r.error) || '切换失败')
+          }).catch(function (err) { setBusy(''); notify('切换失败: ' + err.message) })
+        }
+        // Unsaved edits belong to the note being left, so save them before switching.
+        if (dirtyRef.current) flush(true).then(go)
+        else go()
       }
       /** Read a dropped/picked File as UTF-8 text (base64 for the wire). */
       function fileToBase64(file) {
@@ -2018,7 +2082,7 @@ return {
           notify('已读取 ' + res.name + '（' + Math.round((res.base64.length * 3) / 4 / 1024) + ' KB）')
         }).catch(function (err) { notify('读取文件失败: ' + err.message) })
       }
-      const notesRow = (!notesApi) ? null : h('div', {
+      const notesRow = h('div', {
         className: 'dn-notes', key: 'notes',
         'data-drag': noteDrag ? 'true' : 'false',
         onDragOver: function (e) { e.preventDefault(); setNoteDrag(true) },
@@ -2079,14 +2143,6 @@ return {
               onClick: noteModal.kind === 'create' ? submitCreate : (noteModal.kind === 'import' ? submitImport : submitRename),
             }, noteModal.kind === 'create' ? '创建' : (noteModal.kind === 'import' ? '导入' : '重命名')),
           ]),
-        ]),
-      ]) : null
-      const emptyEl = (notesApi && !notes.length && mode === 'read') ? h('div', { className: 'dn-empty', key: 'empty' }, [
-        h('div', { className: 'dn-empty-title', key: 't' }, '本会话还没有笔记'),
-        h('div', { className: 'dn-empty-sub', key: 's' }, '每个会话有自己独立的一份笔记空间，互不可见。'),
-        h('div', { className: 'dn-empty-actions', key: 'a' }, [
-          h('button', { className: 'dn-mini dn-mini-primary', key: 'new', type: 'button', onClick: function () { setNoteModal({ kind: 'create', name: '', text: '' }) } }, '新建笔记'),
-          h('button', { className: 'dn-mini', key: 'imp', type: 'button', onClick: function () { setNoteModal({ kind: 'create', name: '', text: '' }) } }, '从文件创建…'),
         ]),
       ]) : null
       const head = h('div', {
@@ -2150,7 +2206,7 @@ return {
             const txt = e.clipboardData && typeof e.clipboardData.getData === 'function' ? e.clipboardData.getData('text/plain') : ''
             if (txt && noteModal) { setNoteModal(function (p) { return Object.assign({}, p, { text: String((p && p.text) || '') + txt }) }) }
           },
-        }, notes.length ? bodyKids : (emptyEl ? [emptyEl] : bodyKids)),
+        }, bodyKids),
         panelEl, foot, modalEl,
         toast ? h('div', { className: 'dn-toast', key: 'toast' }, toast) : null,
       ])

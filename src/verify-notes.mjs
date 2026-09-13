@@ -143,6 +143,8 @@ sessions._m.set(SID_B, sessionWith(SID_B, WS))
 const policy = { workspaceRoot: WS, resolve(a) { const s = a && a.session; return { workspaceRoot: s && s.header && s.header.cwd ? s.header.cwd : WS } } }
 const tools = new Map()
 let routeHandler = null
+let commandSpec = null
+const commandCtx = { commands: { register(spec) { commandSpec = spec; return () => { } }, unregister() { commandSpec = null; return () => { } } } }
 const promptVariables = new Map()
 const ctx = {
   get(name) {
@@ -157,6 +159,8 @@ const ctx = {
     return undefined
   },
   effect(fn) { if (typeof fn === 'function') fn() },
+  // Cordis-style optional injection: the plugin calls ctx.inject(['commands'], cb).
+  inject(deps, cb) { if (deps.indexOf('commands') >= 0 && commandCtx) cb(commandCtx) },
   on() { return () => { } },
   timeout: (fn, ms) => setTimeout(fn, ms),
   interval: (fn, ms) => setInterval(fn, ms),
@@ -243,22 +247,27 @@ ok('note_delete with confirm removes the whole tree including .git',
 const last = await asTool('note_list', {}, SID_A)
 ok('the session keeps working with what is left', last.notes.length === 1 && last.notes[0].name === '会议纪要', JSON.stringify(last.notes))
 
-console.log('legacy migration')
-const WS2 = 'C:/WS/legacy'
-const SID_L = 'session-legacy-3333'
-sessions._m.set(SID_L, sessionWith(SID_L, WS2))
-writeFile(WS2 + '/dsh-note/note.md', '# 旧笔记\n\n这是升级前的内容\n')
-writeFile(WS2 + '/dsh-note/.note-state.json', JSON.stringify({ v: 1, seq: 1, selections: [{ id: 'sel-1', seq: 1, startLine: 3, startCol: 0, endLine: 3, endCol: 6, text: '旧内容', createdAt: 'x', color: 'yellow' }] }) + '\n')
-writeFile(WS2 + '/dsh-note/.git/HEAD', 'ref: refs/heads/main\n')
-const migrated = await asTool('note_read', {}, SID_L)
-ok('the legacy note migrates on first use in a session', /这是升级前的内容/.test(migrated.text), JSON.stringify(migrated.text && migrated.text.slice(0, 24)))
-ok('the migrated note lands in the new layout',
-  files.has(k(WS2 + NEST + SID_L + '/note/note.md')), WS2 + NEST + SID_L + '/note/note.md')
-ok('the legacy git repository came along',
-  files.has(k(WS2 + NEST + SID_L + '/note/.git/HEAD')), 'history preserved')
-ok('the legacy selections came along',
-  (await rpc('state', { revision: -1, sessionId: SID_L })).result.selections.length === 1, 'one selection')
-ok('the legacy directory is left intact', files.has(k(WS2 + '/dsh-note/note.md')), 'original untouched')
+console.log('selections are per note')
+// The selection set belongs to ONE note: switching notes must show that note's own
+// highlights (and the tools must never mix them up).
+await tools.get('note_open').execute({ name: '会议纪要' }, { agent: { session: sessionWith(SID_A, WS) } })
+await tools.get('note_write').execute({ content: '第一行内容\n第二行内容\n', mode: 'replace', commit: false }, { agent: { session: sessionWith(SID_A, WS) } })
+const selA = await tools.get('note_add_selection').execute({ startLine: 1, startCol: 0, endLine: 1, endCol: 3, color: 'yellow' }, { agent: { session: sessionWith(SID_A, WS) } })
+ok('a selection can be added to the open note', selA && selA.ok === true, JSON.stringify(selA && selA.ok))
+const gotA = await tools.get('note_get_selections').execute({}, { agent: { session: sessionWith(SID_A, WS) } })
+ok('note_get_selections returns it', gotA.length === 1 && gotA[0].startLine === 1, JSON.stringify(gotA.map((x) => x.startLine + ':' + x.startCol)))
+const created = await tools.get('note_create').execute({ name: '另一份', text: '# 另一份\n别的正文\n' }, { agent: { session: sessionWith(SID_A, WS) } })
+ok('a second note can be opened', created.ok === true, JSON.stringify(created && created.ok))
+const gotB = await tools.get('note_get_selections').execute({}, { agent: { session: sessionWith(SID_A, WS) } })
+ok('the other note has NO selections of its own', gotB.length === 0, JSON.stringify(gotB.length))
+const found = await tools.get('note_find').execute({ query: '别的正文' }, { agent: { session: sessionWith(SID_A, WS) } })
+ok('note_find searched the newly opened note', found && found.hits && found.hits.length === 1, JSON.stringify(found && found.hits))
+await tools.get('note_open').execute({ name: '会议纪要' }, { agent: { session: sessionWith(SID_A, WS) } })
+const backA = await tools.get('note_get_selections').execute({}, { agent: { session: sessionWith(SID_A, WS) } })
+ok('switching back restores the earlier note selections', backA.length === 1 && backA[0].startLine === 1, JSON.stringify(backA.length))
+ok('the notes list reports rows, not bare names',
+  (await tools.get('note_list').execute({}, { agent: { session: sessionWith(SID_A, WS) } })).notes.every((n) => typeof n.name === 'string' && typeof n.lines === 'number'),
+  'every row has name/lines')
 
 console.log('name safety')
 const bad = await asTool('note_create', { name: '../../evil' }, SID_A)
@@ -269,6 +278,40 @@ ok('a traversal name cannot escape the session subtree',
   JSON.stringify(bad && { ok: bad.ok, name: bad.name, err: bad.error }))
 ok('nothing was written outside the session subtree',
   ![...files.keys()].some((f) => f.indexOf('/WS/evil') >= 0), 'no escaped path')
+
+console.log('/window-note command')
+const SID_C = 'session-cmd-4444'
+sessions._m.set(SID_C, sessionWith(SID_C, WS))
+ok('the command is registered', !!commandSpec && commandSpec.name === 'window-note', JSON.stringify(commandSpec && commandSpec.name))
+const runCmd = async (rawInput, sid) => await commandSpec.handler({ agent: { session: sessionWith(sid, WS) }, rawInput: rawInput })
+const r1 = await runCmd('', SID_C)
+ok('running it in an empty session creates the default note', r1 && r1.kind === 'success' && /已为你新建并打开/.test(r1.text), JSON.stringify(r1 && r1.text))
+ok('and that session now has exactly one note', (await asTool('note_list', {}, SID_C)).notes.length === 1, 'one note')
+const r2 = await runCmd('new 论文', SID_C)
+ok('new <name> creates another note', r2 && r2.kind === 'success' && /论文/.test(r2.text), JSON.stringify(r2 && r2.text))
+const r3 = await runCmd('list', SID_C)
+ok('list reports both notes', r3 && r3.kind === 'success' && /论文/.test(r3.text) && /2 份/.test(r3.text), JSON.stringify(r3 && r3.text))
+const r4 = await runCmd('open note', SID_C)
+ok('open <name> switches the active note', r4 && r4.kind === 'success' && /note/.test(r4.text), JSON.stringify(r4 && r4.text))
+const r5 = await runCmd('open 不存在', SID_C)
+ok('opening a missing note is an error, not a crash', r5 && r5.kind === 'error', JSON.stringify(r5 && r5.kind))
+ok('the command did not leak into another session',
+  (await asTool('note_list', {}, SID_A)).notes.every((n) => n.name !== '论文'), 'session A untouched')
+
+console.log('reading another note by name')
+// The agent must be able to inspect note B while the card keeps showing note A.
+const activeBefore = (await tools.get('note_list').execute({}, { agent: { session: sessionWith(SID_A, WS) } })).active
+const otherSels = await tools.get('note_get_selections').execute({ note: '另一份' }, { agent: { session: sessionWith(SID_A, WS) } })
+ok('selections of a named note can be read', Array.isArray(otherSels), JSON.stringify(otherSels && otherSels.length))
+const otherText = await tools.get('note_read').execute({ note: '另一份' }, { agent: { session: sessionWith(SID_A, WS) } })
+ok('the named note body can be read', /别的正文/.test(otherText.text), JSON.stringify(otherText && otherText.text.slice(0, 20)))
+const activeAfter = (await tools.get('note_list').execute({}, { agent: { session: sessionWith(SID_A, WS) } })).active
+ok('and the open note did not change', activeAfter === activeBefore, JSON.stringify({ activeBefore: activeBefore, activeAfter: activeAfter }))
+const rows = await tools.get('note_list').execute({}, { agent: { session: sessionWith(SID_A, WS) } })
+ok('note rows report their selection counts', rows.notes.every((n) => typeof n.selections === 'number'), JSON.stringify(rows.notes.map((n) => n.name + ':' + n.selections)))
+let missingErr = ''
+try { await tools.get('note_read').execute({ note: '不存在' }, { agent: { session: sessionWith(SID_A, WS) } }) } catch (e) { missingErr = String(e.message || e) }
+ok('a missing note name fails loudly', /没有名为/.test(missingErr), missingErr.slice(0, 70))
 
 console.log(failed === 0 ? '\nALL NOTE-MODEL CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')
 process.exit(failed === 0 ? 0 : 1)

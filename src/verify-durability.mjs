@@ -24,10 +24,8 @@ const ok = (label, cond, detail) => {
 
 const k = (p) => String(p).replace(/\\/g, '/')
 const ROOT = 'C:/WS/dur'
-const LEGACY = ROOT + '/dsh-note/note.md'
-const LEGACY_STATE = ROOT + '/dsh-note/.note-state.json'
 const SID = 'sess-dur'
-// After the one-shot migration the session's note lives here.
+// The session's note space (one directory per note, each with its own git).
 const NOTE = ROOT + '/dsh-window/note/' + SID + '/note/note.md'
 const STATE = ROOT + '/dsh-window/note/' + SID + '/note/.note-state.json'
 
@@ -111,7 +109,7 @@ const ctx = {
 }
 ctx.tools = { register(t) { tools.set(t.name, t) } }
 
-files.set(LEGACY, 'original line\n')
+files.set(NOTE, 'original line\n')
 bumpVersion(NOTE)
 
 host.apply(ctx, {})
