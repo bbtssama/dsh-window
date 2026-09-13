@@ -873,7 +873,7 @@ return {
           try { await commit('note: 新建 ' + name + (kind === 'empty' ? '' : '（来自' + kind + '）')) } catch (err) { }
         }
       } else sessionNotes = null
-      return { ok: true, name: name, active: activeNote, source: kind, lineCount: linesOf(content).length, sessionId: sessionId, dir: dir }
+      return { ok: true, name: name, active: activeNote, source: kind, lineCount: linesOf(content).length, dir: dir }
     }
     /** Clear the active note's body, keeping its git history (a commit records it). */
     async function clearNote(opts) {
@@ -1185,7 +1185,7 @@ return {
               type: 'array', required: true,
               items: {
                 type: 'object', additionalProperties: false,
-                properties: { name: { type: 'string', required: true }, active: { type: 'boolean', required: true }, lines: { type: 'integer', required: true }, bytes: { type: 'integer', required: true }, commitHash: { type: 'string', required: true } },
+                properties: { name: { type: 'string', required: true }, active: { type: 'boolean', required: true }, lines: { type: 'integer', required: true }, bytes: { type: 'integer', required: true }, commitHash: { type: 'string', required: true }, selections: { type: 'integer', required: true } },
               },
             },
           },
@@ -1253,7 +1253,7 @@ return {
       description: '永久删除某份笔记：整个目录（note.md、选中记录、以及它自己的 .git 历史）都会被删除，无法恢复。必须带 confirm: true。',
       parameters: { name: { type: 'string', required: true, description: '要删除的笔记名' }, confirm: { type: 'boolean', description: '必须为 true 才会真的删除' } },
       output: {
-        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, deleted: { type: 'string', required: true }, active: { type: 'string', required: true }, remaining: { type: 'array', required: true, items: { type: 'string' } }, needsConfirm: { type: 'boolean', required: true }, error: { type: 'string', required: true } } },
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, deleted: { type: 'string', required: true }, name: { type: 'string' }, active: { type: 'string', required: true }, remaining: { type: 'array', required: true, items: { type: 'string' } }, needsConfirm: { type: 'boolean', required: true }, error: { type: 'string', required: true } } },
         render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已删除《' + v.deleted + '》连同其 git；本会话还剩 ' + v.remaining.length + ' 份' + (v.active ? '，当前打开《' + v.active + '》' : '')) : ('删除失败: ' + v.error) }] },
       },
       async execute(args, exec) {

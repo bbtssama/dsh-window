@@ -137,6 +137,42 @@ const shell = {
 }
 
 const sessions = { _m: new Map(), get(id) { return this._m.get(id) || null } }
+
+// ── output-schema conformance, exactly as the harness enforces it ────────────────
+function checkSchema(schema, value, path, errs) {
+  if (!schema) return
+  if (schema.type === 'object') {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) { errs.push(path + ' is not an object'); return }
+    const props = schema.properties || {}
+    for (const k of Object.keys(props)) if (props[k].required && !(k in value)) errs.push(path + '.' + k + ' is missing')
+    if (schema.additionalProperties === false) for (const k of Object.keys(value)) if (!(k in props)) errs.push(path + '.' + k + ' is not a declared property')
+    for (const k of Object.keys(value)) if (props[k]) checkSchema(props[k], value[k], path + '.' + k, errs)
+    return
+  }
+  if (schema.type === 'array') {
+    if (!Array.isArray(value)) { errs.push(path + ' is not an array'); return }
+    for (let i = 0; i < value.length; i++) checkSchema(schema.items, value[i], path + '[' + i + ']', errs)
+    return
+  }
+  if (schema.type === 'string' && typeof value !== 'string') errs.push(path + ' is not a string')
+  if (schema.type === 'integer' && !Number.isInteger(value)) errs.push(path + ' is not an integer')
+  if (schema.type === 'boolean' && typeof value !== 'boolean') errs.push(path + ' is not a boolean')
+}
+/** Reject a tool result the harness would reject. */
+function wrapSchemaChecked(t) {
+  const inner = t.execute
+  t.execute = async function (args, exec) {
+    const value = await inner.call(t, args, exec)
+    const errs = []
+    checkSchema(t.output && t.output.schema, value, t.name, errs)
+    if (errs.length) {
+      failed++
+      console.log('  FAIL  ' + t.name + ' output violates its schema  -> ' + errs.slice(0, 3).join('; '))
+    }
+    return value
+  }
+  return t
+}
 function sessionWith(id, cwd) { return { header: { id, cwd } } }
 sessions._m.set(SID_A, sessionWith(SID_A, WS))
 sessions._m.set(SID_B, sessionWith(SID_B, WS))
@@ -153,7 +189,7 @@ const ctx = {
     if (name === 'sandboxPolicy') return policy
     if (name === 'sessions') return sessions
     if (name === 'agents') return { currentInitiator: () => null, list: () => [] }
-    if (name === 'tools') return { register(t) { tools.set(t.name, t) } }
+    if (name === 'tools') return { register(t) { tools.set(t.name, wrapSchemaChecked(t)) } }
     if (name === 'webServer') return { register(spec) { if (String(spec.path).indexOf('/rpc') >= 0) routeHandler = spec.handler; return () => { } } }
     if (name === 'systemPrompt') return { section() { return () => { } }, variable(n, p) { promptVariables.set(n, p); return () => { } }, add() { return () => { } } }
     return undefined
