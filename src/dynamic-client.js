@@ -784,6 +784,25 @@ return {
       // How long [选中] must be held before the remark input opens instead of committing.
       const REMARK_HOLD_MS = 450
       const noteNameRef = React.useRef('')
+      // The body element the scroll/resize listeners are currently attached to, its teardown,
+      // the two overlay layers whose transform keeps them glued to the text, and a counter that
+      // increments on every body scroll (gestures use it to notice that the CONTENT moved).
+      const scrollHostRef = React.useRef(null)
+      const detachHostRef = React.useRef(null)
+      const layInBackRef = React.useRef(null)
+      const layInFrontRef = React.useRef(null)
+      const scrollStampRef = React.useRef(0)
+      // Shift both overlay layers to the current scroll offset, without waiting for a render.
+      // The layers sit next to the (scrolling) body, so this transform is the only thing that
+      // makes an overlay follow the text; every overlay inside keeps using content coordinates.
+      function applyLayerShift() {
+        const host = bodyRef.current
+        scrollStampRef.current += 1
+        if (!host) return
+        const t = 'translate(' + (-host.scrollLeft) + 'px,' + (-host.scrollTop) + 'px)'
+        try { if (layInBackRef.current) layInBackRef.current.style.transform = t } catch (err) { }
+        try { if (layInFrontRef.current) layInFrontRef.current.style.transform = t } catch (err) { }
+      }
       sidRef.current = shownSessionId || ''
       noteNameRef.current = noteName || ''
       function notify(msg) { setToast(msg) }
@@ -870,19 +889,30 @@ return {
           if (viewSaveTimerRef.current !== null) { try { window.clearTimeout(viewSaveTimerRef.current) } catch (err) { } viewSaveTimerRef.current = null }
         }
       }, [])
+      // ── the listeners that must follow the BODY ELEMENT, not the note text ──────────
+      // `hidden` (collapse) makes the component return the pill instead of the card, so the
+      // whole card subtree — including `.dn-body` — is unmounted, and expanding mounts a NEW
+      // body element. An effect keyed on `st.text` therefore left the scroll listener on a
+      // detached node: no scroll tick, no layer shift, and a live (blue) selection stayed
+      // pinned to the viewport while the text scrolled under it. That is the intermittent
+      // "蓝色选中不随滚轮移动". Re-attaching whenever the element identity changes fixes the
+      // whole class, not just that one path.
       React.useEffect(function () {
         const host = bodyRef.current
+        if (host === scrollHostRef.current) return undefined
+        if (detachHostRef.current) { try { detachHostRef.current() } catch (err) { } detachHostRef.current = null }
+        scrollHostRef.current = host
         if (!host) return undefined
         const nodes = host.querySelectorAll('[data-dn-table], .dn-pre, .dn-mmd')
         const onScroll = function () { bump() }
         for (let i = 0; i < nodes.length; i++) { try { nodes[i].addEventListener('scroll', onScroll, { passive: true }) } catch (err) { } }
-        // The body scrolls vertically and had NO listener at all: the overlay layer only
-        // paints the lines inside the visible window, so once the note was scrolled the
-        // window stayed where the last render had left it and the highlights of the lines
-        // that came into view were never drawn (a saved selection appeared to vanish as
-        // soon as you scrolled away and back). A body scroll changes no measurement — the
-        // bands and cells are content coordinates — so it only needs a re-render.
+        // A body scroll changes no measurement — bands and cells are content coordinates — so
+        // it needs a re-render (which lines are worth painting) and, immediately, a shift of
+        // the overlay layers. The shift is applied here, imperatively, so the highlights are
+        // glued to the text even if a render is still pending; the render reads the same
+        // scrollTop and writes the same transform, so the two can never disagree.
         const onBodyScroll = function () {
+          applyLayerShift()
           setScrollTick(function (v) { return v + 1 })
           scheduleViewSave()
         }
@@ -896,12 +926,18 @@ return {
           ro = new ResizeObserver(function () { bump() })
           for (let i = 0; i < nodes.length; i++) ro.observe(nodes[i])
         } catch (err) { ro = null }
-        return function () {
+        detachHostRef.current = function () {
           for (let i = 0; i < nodes.length; i++) { try { nodes[i].removeEventListener('scroll', onScroll) } catch (err) { } }
           try { host.removeEventListener('scroll', onBodyScroll) } catch (err) { }
           try { if (ro) ro.disconnect() } catch (err) { }
         }
-      }, [st ? st.text : ''])
+        return undefined
+      })
+      // Unmount only: the listeners above are torn down when the body element changes, and
+      // this makes sure the last set does not outlive the card.
+      React.useEffect(function () {
+        return function () { if (detachHostRef.current) { try { detachHostRef.current() } catch (err) { } detachHostRef.current = null } }
+      }, [])
       React.useEffect(function () {
         if (firstLayoutRef.current) { firstLayoutRef.current = false; return }
         writeLayout(layout)
@@ -1667,6 +1703,14 @@ return {
           const dy = Math.abs(p0.y - d.y)
           if (dy > UNIT_SLOP_Y || dx <= UNIT_SLOP_X) return
         }
+        // The content scrolled since this gesture's unit was created, so the line under the
+        // pointer is no longer the line the user pointed at. A one-pixel nudge must not be
+        // read as "drag across the document" — that is the other half of "长按不拖动，却自动
+        // 框选了一大片，且相当不可控". A deliberate move (>24px) re-arms the extension.
+        if (!isTouch && d.stamp !== scrollStampRef.current) {
+          if (Math.abs(p0.x - d.x) + Math.abs(p0.y - d.y) < 24) return
+          d.stamp = scrollStampRef.current
+        }
         if (d.unit === 'block') return
         d.unit = null
         const p = p0
@@ -1762,34 +1806,55 @@ return {
         if (!pt) return
         const el = e.currentTarget
         try { el.setPointerCapture(e.pointerId) } catch (err) { }
-        drag.current = { mode: 'press', x: e.clientX, y: e.clientY, pt: pt }
+        drag.current = { mode: 'press', x: e.clientX, y: e.clientY, pt: pt, stamp: scrollStampRef.current }
         setPressing(true)
         if (lpTimer.current) { lpTimer.current(); lpTimer.current = null }
         lpTimer.current = ctx.timeout(function () {
           lpTimer.current = null
           const d = drag.current
           if (!d || !d.pt || d.mode !== 'press') return
+          // The CONTENT moved under the cursor while the press was pending (a wheel, a
+          // momentum scroll, an image that finished loading and pushed the text down). The
+          // stored line/column then describes a position that is no longer under the pointer,
+          // so continuing would select a passage the user never pointed at — that is one half
+          // of "长按不拖动却框选了一大片". Drop the gesture instead of guessing.
+          if (d.stamp !== scrollStampRef.current) { drag.current = null; setPressing(false); return }
           d.mode = 'drag'
           navGuardRef.current = true
           // Marks this gesture as "one unit, not a free range" — see onDragMove.
           d.unit = 'block'
-          if (!cellsOf(d.pt.line).cells.length) {
-            // A block with no character boxes (a Mermaid diagram, an image) cannot be
-            // word-selected, and line/column math cannot express "this whole block":
-            // only the opening fence line owns a rendered element, so an end position
-            // on an inner line produced no second handle and no highlight. The
-            // selection is carried as a flag and rendered from the element's rect.
-            const rangeBlock = blockRangeAt(d.pt.line)
-            const lineBlock = rangeBlock ? rangeBlock.from : d.pt.line
-            setLive({ a: { line: lineBlock, col: 0 }, f: { line: lineBlock, col: 0 }, block: true })
-            return
+          // A line with no character boxes cannot be word-selected, and line/column maths
+          // cannot express "this whole block" (only the first line owns a rendered element).
+          // Two very different cases used to share one answer, and that is what made a long
+          // press select "a lot of text, uncontrollably":
+          //   * a blank line or an --- rule INSIDE a code block or a table: blockRangeAt()
+          //     answers with the ENTIRE block, so pressing a blank line selected the whole
+          //     listing. The line itself has neighbours that ARE selectable — use the nearest
+          //     one and word-select there, which is small and predictable.
+          //   * a diagram or image: nothing in the whole block is selectable, so the block
+          //     really is the unit and the flag is the only way to express it.
+          let boxed = d.pt.line
+          const cells0 = cellsOf(boxed).cells
+          if (!cells0.length) {
+            const blk = blockRangeAt(d.pt.line)
+            const from = blk ? blk.from : d.pt.line
+            const to = blk ? blk.to : d.pt.line
+            let found = 0
+            for (let probe = d.pt.line; probe <= to && !found; probe++) if (cellsOf(probe).cells.length) found = probe
+            for (let probe = d.pt.line - 1; probe >= from && !found; probe--) if (cellsOf(probe).cells.length) found = probe
+            if (!found) {
+              setLive({ a: { line: from, col: 0 }, f: { line: from, col: 0 }, block: true })
+              return
+            }
+            boxed = found
+            d.pt = { line: found, col: 0 }
           }
           const w = wordRange(d.pt)
           const a = Math.min(w.from, w.to), f = Math.max(w.from, w.to)
           // An image's own source range is a unit too (`snapCol` would otherwise collapse
           // it to a zero-width range as the finger drifts), a word is as well.
-          d.unit = cellsOf(d.pt.line).cells.length === 1 && cellsOf(d.pt.line).cells[0].img ? 'image' : 'word'
-          setLive({ a: { line: d.pt.line, col: snapCol(d.pt.line, a) }, f: { line: d.pt.line, col: snapCol(d.pt.line, f) } })
+          d.unit = cellsOf(boxed).cells.length === 1 && cellsOf(boxed).cells[0].img ? 'image' : 'word'
+          setLive({ a: { line: boxed, col: snapCol(boxed, a) }, f: { line: boxed, col: snapCol(boxed, f) } })
         }, 400)
         bindPointer(el)
       }
@@ -2626,8 +2691,8 @@ return {
             if (txt && noteModal) { setNoteModal(function (p) { return Object.assign({}, p, { text: String((p && p.text) || '') + txt }) }) }
           },
         }, bodyKids),
-        h('div', { className: 'dn-lay dn-lay-back', key: 'layback' }, h('div', { className: 'dn-lay-in', key: 'inb', style: layShift }, layBack)),
-        h('div', { className: 'dn-lay dn-lay-front', key: 'layfront' }, h('div', { className: 'dn-lay-in', key: 'inf', style: layShift }, layFront)),
+        h('div', { className: 'dn-lay dn-lay-back', key: 'layback' }, h('div', { className: 'dn-lay-in', key: 'inb', ref: layInBackRef, style: layShift }, layBack)),
+        h('div', { className: 'dn-lay dn-lay-front', key: 'layfront' }, h('div', { className: 'dn-lay-in', key: 'inf', ref: layInFrontRef, style: layShift }, layFront)),
         ]),
         panelEl, foot, modalEl, remarkEl,
         toast ? h('div', { className: 'dn-toast', key: 'toast' }, toast) : null,
