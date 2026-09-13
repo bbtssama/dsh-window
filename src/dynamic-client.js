@@ -40,6 +40,29 @@ const CSS = [
 '.dn-bar{z-index:6;}',
 '.dn-handle{z-index:6;}',
 '.dn-pen-pop{position:absolute;bottom:26px;left:-4px;display:flex;padding:5px;border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid rgba(0,0,0,.14);box-shadow:0 6px 18px rgba(0,0,0,.18);z-index:3;}',
+// The notes row: session-scoped note list plus the actions that create, import, rename,
+// clear or delete one. Each note is its own directory with its own git history.
+'.dn-notes{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:6px 10px;border-bottom:1px solid rgba(0,0,0,.08);background:rgba(0,0,0,.015);flex-wrap:wrap;}',
+'.dn-notes[data-drag=true]{background:rgba(90,150,255,.14);outline:2px dashed rgba(90,150,255,.6);outline-offset:-2px;}',
+'.dn-notes-label{font-size:11.5px;color:var(--dsw-alias-label-tertiary,#8a8f98);}',
+'.dn-notes-none{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f98);}',
+'.dn-notes-pick{max-width:190px;font-size:12px;padding:3px 4px;border:1px solid rgba(0,0,0,.16);border-radius:7px;background:transparent;color:inherit;font-family:inherit;}',
+'.dn-mini{font-size:11.5px;padding:3px 8px;border:1px solid rgba(0,0,0,.16);border-radius:7px;background:transparent;color:inherit;cursor:pointer;font-family:inherit;touch-action:manipulation;}',
+'.dn-mini:hover{background:rgba(0,0,0,.05);}',
+'.dn-mini-primary{background:#4f7cff;border-color:#4f7cff;color:#fff;}',
+'.dn-mini-danger{color:#c0392b;border-color:rgba(192,57,43,.4);}',
+'.dn-empty{padding:26px 18px;text-align:center;color:var(--dsw-alias-label-secondary,#555);}',
+'.dn-empty-title{font-size:14px;font-weight:600;margin-bottom:6px;}',
+'.dn-empty-sub{font-size:12px;color:var(--dsw-alias-label-tertiary,#8a8f98);margin-bottom:14px;}',
+'.dn-empty-actions{display:flex;gap:8px;justify-content:center;}',
+'.dn-modal{position:absolute;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.28);padding:12px;}',
+'.dn-modal-box{width:100%;max-width:420px;background:var(--dsw-alias-bg-layer-1,#fff);border-radius:12px;padding:14px;box-shadow:0 16px 40px rgba(0,0,0,.3);display:flex;flex-direction:column;gap:8px;max-height:100%;overflow:auto;}',
+'.dn-modal-title{font-size:13.5px;font-weight:600;}',
+'.dn-modal-input{font-size:13px;padding:6px 8px;border:1px solid rgba(0,0,0,.18);border-radius:8px;background:transparent;color:inherit;font-family:inherit;}',
+'.dn-modal-text{font-size:12.5px;min-height:110px;padding:6px 8px;border:1px solid rgba(0,0,0,.18);border-radius:8px;background:transparent;color:inherit;font-family:ui-monospace,Consolas,monospace;resize:vertical;}',
+'.dn-modal-row{display:flex;align-items:center;gap:6px;font-size:12px;}',
+'.dn-modal-file{font-size:12px;color:#4f7cff;}',
+'.dn-modal-actions{display:flex;align-items:center;gap:8px;}',
 '.dn-head{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:44px;padding:0 10px 0 14px;background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.03));border-bottom:1px solid var(--dsw-alias-line-normal,rgba(0,0,0,.12));cursor:grab;touch-action:none;user-select:none;}',
 '.dn-head[data-dragging=true]{cursor:grabbing;}',
 '.dn-head[data-compact=true]{cursor:default;touch-action:auto;}',
@@ -671,6 +694,15 @@ return {
       const [offline, setOffline] = React.useState(false)
       const [layout, setLayout] = React.useState(readLayout)
       const [geoVer, setGeoVer] = React.useState(0)
+      const [notes, setNotes] = React.useState([])
+      const [noteName, setNoteName] = React.useState('')
+      // Whether the HOST we are talking to knows about note spaces. The storage redesign
+      // is host-plane, so until dsh restarts the panel must not claim "本会话还没有笔记"
+      // while an older host is still serving one shared note — it degrades to the previous
+      // single-note card instead.
+      const [notesApi, setNotesApi] = React.useState(false)
+      const [noteModal, setNoteModal] = React.useState(null)
+      const [noteDrag, setNoteDrag] = React.useState(false)
       const [bounds, setBounds] = React.useState(function () { try { return { w: window.innerWidth, h: window.innerHeight } } catch (err) { return { w: 1280, h: 800 } } })
       const [dragging, setDragging] = React.useState(false)
       const useSessionsHook = (props && typeof props.useSessions === 'function') ? props.useSessions : function () { return undefined }
@@ -797,6 +829,7 @@ return {
         revRef.current = r.revision
         textRef.current = r.text
         setSt(r)
+        applyNotes(r)
         bump()
         if (!dirtyRef.current) { draftRef.current = r.text; setDraft(r.text) }
       }
@@ -1862,6 +1895,200 @@ return {
       }
       let sizeLabel = Math.round(geo.width) + 'px'
       for (let i = 0; i < SIZES.length; i++) if (SIZES[i].id === layout.size) sizeLabel = SIZES[i].label
+      // ── 笔记（多笔记 + 会话隔离）──────────────────────────────────────────────
+      // The session id is the path segment on the host, so every call carries it. The
+      // panel is the only place that creates, switches, imports, clears or deletes notes.
+      function applyNotes(r) {
+        if (!r) return
+        setNotesApi('notes' in r)
+        if (Array.isArray(r.notes)) setNotes(r.notes)
+        if (typeof r.active === 'string') setNoteName(r.active)
+      }
+      function refreshNotes() {
+        return host.call('listNotes', { sessionId: sidRef.current }).then(function (r) {
+          if (r && r.ok) { setNotes(r.notes || []); setNoteName(r.active || '') }
+          return r
+        }).catch(function () { return null })
+      }
+      function switchNote(name) {
+        if (!name || name === noteName) return
+        setBusy('切换中')
+        host.call('selectNote', { sessionId: sidRef.current, name: name }).then(function (r) {
+          setBusy('')
+          if (r && r.ok) {
+            applyState(r)
+            setNoteName(name)
+            notify('已打开《' + name + '》')
+            return refreshNotes()
+          }
+          notify((r && r.error) || '切换失败')
+        }).catch(function (err) { setBusy(''); notify('切换失败: ' + err.message) })
+      }
+      /** Read a dropped/picked File as UTF-8 text (base64 for the wire). */
+      function fileToBase64(file) {
+        return new Promise(function (resolve, reject) {
+          try {
+            const fr = new FileReader()
+            fr.onload = function () {
+              const s = String(fr.result || '')
+              const at = s.indexOf(',')
+              resolve({ name: file && file.name ? file.name : 'pasted', base64: at >= 0 ? s.slice(at + 1) : s })
+            }
+            fr.onerror = function () { reject(new Error('读取文件失败')) }
+            fr.readAsDataURL(file)
+          } catch (err) { reject(err) }
+        })
+      }
+      function submitCreate() {
+        const m = noteModal || {}
+        const name = String(m.name || '').trim()
+        if (!name) { notify('请填写笔记名'); return }
+        setBusy('创建中')
+        host.call('createNote', { sessionId: sidRef.current, name: name, text: m.text || '', base64: m.base64 || '', open: true }).then(function (r) {
+          setBusy('')
+          if (r && r.ok) {
+            setNoteModal(null)
+            notify('已新建《' + r.name + '》' + (r.source !== 'empty' ? '（来自' + r.source + '）' : ''))
+            setNoteName(r.name)
+            return refreshNotes().then(function () { return doReload() })
+          }
+          notify((r && r.error) || '创建失败')
+        }).catch(function (err) { setBusy(''); notify('创建失败: ' + err.message) })
+      }
+      function submitImport() {
+        const m = noteModal || {}
+        if (!m.text && !m.base64) { notify('请粘贴内容或选择文件'); return }
+        setBusy('导入中')
+        host.call('importNote', { sessionId: sidRef.current, text: m.text || '', base64: m.base64 || '', mode: m.mode || 'append' }).then(function (r) {
+          setBusy('')
+          if (r && r.ok) { setNoteModal(null); notify('已导入到《' + r.name + '》'); return doReload() }
+          notify((r && r.error) || '导入失败')
+        }).catch(function (err) { setBusy(''); notify('导入失败: ' + err.message) })
+      }
+      function submitRename() {
+        const m = noteModal || {}
+        const to = String(m.name || '').trim()
+        if (!to) { notify('请填写新名字'); return }
+        setBusy('重命名中')
+        host.call('renameNote', { sessionId: sidRef.current, from: noteName, to: to }).then(function (r) {
+          setBusy('')
+          if (r && r.ok) { setNoteModal(null); setNoteName(r.to); notify('已重命名为《' + r.to + '》'); return refreshNotes() }
+          notify((r && r.error) || '重命名失败')
+        }).catch(function (err) { setBusy(''); notify('重命名失败: ' + err.message) })
+      }
+      function doClearNote() {
+        const sure = window.confirm('清空《' + noteName + '》的正文？\n\ngit 历史会保留（清空前后各提交一次），正文则被替换为标题行。')
+        if (!sure) return
+        setBusy('清空中')
+        host.call('clearNote', { sessionId: sidRef.current }).then(function (r) {
+          setBusy('')
+          if (r && r.ok) { notify('已清空《' + r.name + '》（清掉 ' + r.clearedLines + ' 行，历史保留）'); return doReload() }
+          notify((r && r.error) || '清空失败')
+        }).catch(function (err) { setBusy(''); notify('清空失败: ' + err.message) })
+      }
+      function doDeleteNote() {
+        const sure = window.confirm('彻底删除《' + noteName + '》？\n\n整个目录都会被删除，包括它的 .git 历史，无法恢复。')
+        if (!sure) return
+        setBusy('删除中')
+        host.call('deleteNote', { sessionId: sidRef.current, name: noteName, confirm: true }).then(function (r) {
+          setBusy('')
+          if (r && r.ok) {
+            notify('已删除《' + r.deleted + '》' + (r.active ? '，现在打开《' + r.active + '》' : '，本会话已没有笔记'))
+            setNotes(r.notes || []); setNoteName(r.active || '')
+            if (r.active) return doReload()
+            revRef.current = -1
+            return refreshNotes()
+          }
+          notify((r && r.error) || '删除失败')
+        }).catch(function (err) { setBusy(''); notify('删除失败: ' + err.message) })
+      }
+      /** Drop/paste a file onto the card while a modal is open, or import directly. */
+      function takeDroppedFiles(files, intoModal) {
+        const list = Array.prototype.slice.call(files || [])
+        if (!list.length) return
+        const f = list[0]
+        fileToBase64(f).then(function (res) {
+          const base = f.name ? f.name.replace(/\.[^.]+$/, '') : '导入'
+          if (intoModal === 'create') setNoteModal(function (prev) { return Object.assign({}, prev || {}, { name: (prev && prev.name) || base, base64: res.base64, fileName: res.name }) })
+          else if (intoModal === 'import') setNoteModal(function (prev) { return Object.assign({}, prev || {}, { base64: res.base64, fileName: res.name }) })
+          else {
+            // No dialog open: offer to create a note from the file.
+            setNoteModal({ kind: 'create', name: base, base64: res.base64, fileName: res.name })
+          }
+          notify('已读取 ' + res.name + '（' + Math.round((res.base64.length * 3) / 4 / 1024) + ' KB）')
+        }).catch(function (err) { notify('读取文件失败: ' + err.message) })
+      }
+      const notesRow = (!notesApi) ? null : h('div', {
+        className: 'dn-notes', key: 'notes',
+        'data-drag': noteDrag ? 'true' : 'false',
+        onDragOver: function (e) { e.preventDefault(); setNoteDrag(true) },
+        onDragLeave: function () { setNoteDrag(false) },
+        onDrop: function (e) {
+          e.preventDefault(); setNoteDrag(false)
+          takeDroppedFiles(e.dataTransfer && e.dataTransfer.files, noteModal ? noteModal.kind : null)
+        },
+      }, [
+        h('span', { className: 'dn-notes-label', key: 'l' }, '笔记'),
+        notes.length
+          ? h('select', {
+            className: 'dn-notes-pick', key: 'p', value: noteName,
+            onChange: function (e) { switchNote(e.target.value) },
+          }, notes.map(function (n) {
+            return h('option', { key: n.name, value: n.name }, n.name + '  (' + n.lines + ' 行' + (n.commitHash ? ' · ' + n.commitHash : '') + ')')
+          }))
+          : h('span', { key: 'p', className: 'dn-notes-none' }, '本会话还没有笔记'),
+        h('button', { className: 'dn-mini', key: 'new', type: 'button', title: '在本会话新建一份笔记', onClick: function () { setNoteModal({ kind: 'create', name: '', text: '' }) } }, '新建'),
+        notes.length ? h('button', { className: 'dn-mini', key: 'imp', type: 'button', title: '把文件或粘贴的内容导入当前笔记', onClick: function () { setNoteModal({ kind: 'import', text: '', mode: 'append' }) } }, '导入') : null,
+        notes.length ? h('button', { className: 'dn-mini', key: 'ren', type: 'button', title: '重命名当前笔记（目录改名，git 随之保留）', onClick: function () { setNoteModal({ kind: 'rename', name: noteName }) } }, '重命名') : null,
+        notes.length ? h('button', { className: 'dn-mini', key: 'clr', type: 'button', title: '清空正文（保留 git 历史）', onClick: doClearNote }, '清空正文') : null,
+        notes.length ? h('button', { className: 'dn-mini dn-mini-danger', key: 'del', type: 'button', title: '删除整份笔记（含它的 git）', onClick: doDeleteNote }, '删除笔记') : null,
+      ])
+      const modalEl = noteModal ? h('div', { className: 'dn-modal', key: 'modal' }, [
+        h('div', { className: 'dn-modal-box', key: 'box' }, [
+          h('div', { className: 'dn-modal-title', key: 't' }, noteModal.kind === 'create' ? '新建笔记' : (noteModal.kind === 'import' ? '导入到《' + noteName + '》' : '重命名《' + noteName + '》')),
+          noteModal.kind === 'rename' ? null : h('input', {
+            className: 'dn-modal-input', key: 'name', placeholder: '笔记名（会作为目录名）', value: noteModal.name || '',
+            onChange: function (e) { const v = e.target.value; setNoteModal(function (p) { return Object.assign({}, p, { name: v }) }) },
+          }),
+          noteModal.kind === 'rename' ? h('input', {
+            className: 'dn-modal-input', key: 'newname', placeholder: '新名字', value: noteModal.name || '',
+            onChange: function (e) { const v = e.target.value; setNoteModal(function (p) { return Object.assign({}, p, { name: v }) }) },
+          }) : null,
+          noteModal.kind === 'rename' ? null : h('textarea', {
+            className: 'dn-modal-text', key: 'text', placeholder: '把 Markdown 粘贴到这里（也可以直接把文件拖到卡片上/点下面的选择文件）',
+            value: noteModal.text || '',
+            onChange: function (e) { const v = e.target.value; setNoteModal(function (p) { return Object.assign({}, p, { text: v }) }) },
+          }),
+          noteModal.kind === 'import' ? h('label', { className: 'dn-modal-row', key: 'mode' }, [
+            h('input', { key: 'c', type: 'checkbox', checked: noteModal.mode === 'replace', onChange: function (e) { const on = e.target.checked; setNoteModal(function (p) { return Object.assign({}, p, { mode: on ? 'replace' : 'append' }) }) } }),
+            h('span', { key: 's' }, '覆盖当前正文（默认是追加）'),
+          ]) : null,
+          noteModal.fileName ? h('div', { className: 'dn-modal-file', key: 'f' }, '已选择文件：' + noteModal.fileName) : null,
+          h('div', { className: 'dn-modal-actions', key: 'a' }, [
+            h('label', { className: 'dn-mini', key: 'pick' }, [
+              '选择文件…',
+              h('input', {
+                key: 'i', type: 'file', style: { display: 'none' },
+                onChange: function (e) { const f = e.target.files && e.target.files[0]; if (f) takeDroppedFiles([f], noteModal.kind) },
+              }),
+            ]),
+            h('span', { key: 'sp', style: { flex: '1 1 auto' } }),
+            h('button', { className: 'dn-mini', key: 'cancel', type: 'button', onClick: function () { setNoteModal(null) } }, '取消'),
+            h('button', {
+              className: 'dn-mini dn-mini-primary', key: 'ok', type: 'button',
+              onClick: noteModal.kind === 'create' ? submitCreate : (noteModal.kind === 'import' ? submitImport : submitRename),
+            }, noteModal.kind === 'create' ? '创建' : (noteModal.kind === 'import' ? '导入' : '重命名')),
+          ]),
+        ]),
+      ]) : null
+      const emptyEl = (notesApi && !notes.length && mode === 'read') ? h('div', { className: 'dn-empty', key: 'empty' }, [
+        h('div', { className: 'dn-empty-title', key: 't' }, '本会话还没有笔记'),
+        h('div', { className: 'dn-empty-sub', key: 's' }, '每个会话有自己独立的一份笔记空间，互不可见。'),
+        h('div', { className: 'dn-empty-actions', key: 'a' }, [
+          h('button', { className: 'dn-mini dn-mini-primary', key: 'new', type: 'button', onClick: function () { setNoteModal({ kind: 'create', name: '', text: '' }) } }, '新建笔记'),
+          h('button', { className: 'dn-mini', key: 'imp', type: 'button', onClick: function () { setNoteModal({ kind: 'create', name: '', text: '' }) } }, '从文件创建…'),
+        ]),
+      ]) : null
       const head = h('div', {
         className: 'dn-head', key: 'head',
         'data-dragging': dragging ? 'true' : 'false',
@@ -1910,14 +2137,21 @@ return {
         })
         : [h('div', { key: 'none', style: { color: '#8a8f98' } }, '还没有选中内容。长按正文约 0.4 秒出现选择器，拖动两个圆点确定范围，再点[选中]。')]) : null
       return h('div', { className: 'dn-root', ref: rootRef, style: geo.style || undefined, 'data-panel-mode': geo.mode }, [
-        head, actions,
+        head, notesRow, actions,
         h('div', {
           className: 'dn-body', key: 'body', ref: bodyRef, onPointerDown: onBodyDown, onDoubleClick: onDoubleClick,
           // Capture phase: the browser fires a click after a long press too, and on a
           // linked image that would navigate away from the card.
           onClickCapture: function (e) { if (navGuardRef.current) { navGuardRef.current = false; e.preventDefault(); e.stopPropagation() } },
-        }, bodyKids),
-        panelEl, foot,
+          // Paste a file (or text into an open dialog) straight onto the card.
+          onPaste: function (e) {
+            const items = e.clipboardData && e.clipboardData.files
+            if (items && items.length) { takeDroppedFiles(items, noteModal ? noteModal.kind : null); return }
+            const txt = e.clipboardData && typeof e.clipboardData.getData === 'function' ? e.clipboardData.getData('text/plain') : ''
+            if (txt && noteModal) { setNoteModal(function (p) { return Object.assign({}, p, { text: String((p && p.text) || '') + txt }) }) }
+          },
+        }, notes.length ? bodyKids : (emptyEl ? [emptyEl] : bodyKids)),
+        panelEl, foot, modalEl,
         toast ? h('div', { className: 'dn-toast', key: 'toast' }, toast) : null,
       ])
     }

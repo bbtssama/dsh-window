@@ -159,6 +159,21 @@ ok('every note tool resolves its workspace explicitly and loudly',
   (hostSource.match(/await enterFromTool\('note_/g) || []).length === 22,
   String((hostSource.match(/await enterFromTool\('note_/g) || []).length) + ' guarded tool entry points')
 
+// The panel and the host must agree on method names, and every note-space call must
+// identify its session — the session id IS the path, so a call without one has no target.
+const clientSource2 = fs.readFileSync(path.join(lib, 'client.js'), 'utf8')
+const clientCalls = [...new Set((clientSource2.match(/host\.call\('([a-zA-Z]+)'/g) || []).map((m) => /'([a-zA-Z]+)'/.exec(m)[1]))]
+const hostMethods = [...new Set((hostSource.match(/handleLocked\('([a-zA-Z]+)'/g) || []).map((m) => /'([a-zA-Z]+)'/.exec(m)[1]))]
+const missingOnHost = clientCalls.filter((m) => !hostMethods.includes(m))
+ok('every RPC the card calls exists on the host',
+  missingOnHost.length === 0,
+  missingOnHost.length ? 'missing: ' + missingOnHost.join(',') : clientCalls.length + ' card RPCs vs ' + hostMethods.length + ' host handlers')
+const sessionScoped = ['state', 'saveText', 'addSelection', 'removeSelection', 'clearSelections', 'commit', 'listNotes', 'createNote', 'selectNote', 'clearNote', 'deleteNote', 'renameNote', 'importNote']
+const unscoped = sessionScoped.filter((m) => clientCalls.includes(m) && !new RegExp("host\\.call\\('" + m + "',[\\s\\S]{0,120}?sessionId").test(clientSource2))
+ok('every note-space RPC carries the session id',
+  unscoped.length === 0,
+  unscoped.length ? 'no sessionId: ' + unscoped.join(',') : sessionScoped.length + ' scoped methods checked')
+
 // Durability: mutations are serialized (AgentTeams' withTeamLock) and every write
 // carries a version guard, so an external edit is detected rather than overwritten.
 ok('mutations are serialized through one note lock',
