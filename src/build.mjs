@@ -79,10 +79,10 @@ const hostHandleHits = count(hostBody, "handleLocked('")
 // rewrite their own implementations to the permanent-plugin equivalents.
 hostBody = hostBody.replaceAll('harness.registerTool(ctx, ', 'ctx.tools.register(')
 hostBody = hostBody.replaceAll('harness.handle(', 'handle(')
-if (hostToolHits !== 26) throw new Error('host: expected 26 tool registrations, saw ' + hostToolHits)
-// 18 note tools + 8 note management tools + 19 rpc handlers
-// (state/saveText/addSelection/saveView/…/importNote/setMarkLook)
-if (hostHandleHits !== 19) throw new Error('host: expected 19 rpc handlers, saw ' + hostHandleHits)
+if (hostToolHits !== 28) throw new Error('host: expected 28 tool registrations, saw ' + hostToolHits)
+// 20 note tools + 8 note management tools + 27 rpc handlers
+// (state/saveText/addSelection/saveView/…/importNote/setMarkLook/lists/uiPush/uiAck)
+if (hostHandleHits !== 27) throw new Error('host: expected 27 rpc handlers, saw ' + hostHandleHits)
 if (hostBody.includes('harness.')) throw new Error('host: a harness.* reference survived')
 
 // ── late-bound services ──
@@ -320,6 +320,20 @@ const hostModule = [
   '  }',
   '  wireLateServices()',
   "  ctx.on('internal/service', wireLateServices)",
+  '  // ...and three bounded retries on top of the event, because the event is the only other',
+  '  // trigger: if `internal/service` fired for the last service just BEFORE this row attached',
+  '  // its listener, nothing would ever call wireLateServices again and the RPC route would',
+  '  // stay unregistered for the whole process — the card would answer 404 to everything.',
+  '  // Cheap insurance: installRpcRoute() is idempotent and both helpers return early.',
+  '  const routeRetries = [200, 1000, 3000].map(function (ms) {',
+  '    return setTimeout(function () { try { wireLateServices() } catch (err) { } }, ms)',
+  '  })',
+  '  ctx.effect(function () {',
+  '    return function () {',
+  '      for (let i = 0; i < routeRetries.length; i++) { try { clearTimeout(routeRetries[i]) } catch (err) { } }',
+  '      routeRetries.length = 0',
+  '    }',
+  '  })',
   '}',
   '',
 ].join('\n')
