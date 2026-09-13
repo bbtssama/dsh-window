@@ -234,6 +234,19 @@ ok('every note-space RPC carries the session id',
   unscoped.length === 0,
   unscoped.length ? 'no sessionId: ' + unscoped.join(',') : sessionScoped.length + ' scoped methods checked')
 
+// A selection can cover source lines that own no element of their own: a table's header
+// and separator rows are drawn as part of its first body row, and a blank source line is
+// legitimately selected as the whole line (range 0..0). Without both fallbacks the card
+// tinted some lines of a multi-line selection and nothing on the others — the reported
+// "我选了 141 到 168 行，渲染出来竟然只有这几行". Verified in the live page: with the
+// fallbacks a 6→24 selection paints every blank line, the --- rule and all table rows.
+ok('a selected line with no element of its own paints its owning block instead',
+  /blockRangeAt\(ln\)/.test(clientSource2) && /for \(let probe = blk\.from/.test(clientSource2),
+  'absorbed lines (table header/separator) fall back to the block that contains them')
+ok('a blank line inside a selection is tinted rather than suppressed',
+  /rawLine\.trim\(\) !== ''/.test(clientSource2),
+  'an empty source line stays paintable inside a multi-line selection')
+
 // Durability: mutations are serialized (AgentTeams' withTeamLock) and every write
 // carries a version guard, so an external edit is detected rather than overwritten.
 ok('mutations are serialized through one note lock',
