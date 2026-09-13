@@ -1448,7 +1448,12 @@ return {
         return { ok: true, revision: S.revision, selections: viewSelections() }
       })
     })
-    handleLocked('clearSelections', async function () {
+    // `args` MUST be declared: this handler was the only one without the parameter, so
+    // `args && args.sessionId` threw a ReferenceError inside the handler and every call
+    // answered { ok:false, error:"args is not defined" }. The card only reacts to ok:true,
+    // so the button did nothing at all and said nothing — the reported
+    // "清空全部选中功能失效". verify-notes now calls all 15 RPCs so this cannot come back.
+    handleLocked('clearSelections', async function (args) {
       if (!bindSession(args && args.sessionId)) return notMine('clearSelections')
       confirmed = true
       await ensureLoaded()

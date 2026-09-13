@@ -402,5 +402,59 @@ ok('every registered tool was exercised on a success path',
   neverCalled.length ? 'never called: ' + neverCalled.join(',') : exercised.size + ' tools exercised')
 ok('the tool count still matches what the client and the docs expect', tools.size === 22, String(tools.size))
 
+console.log('every RPC handler answers')
+// One handler, clearSelections, was declared without its `args` parameter while its body used
+// `args && args.sessionId`. Every call threw a ReferenceError inside the handler and answered
+// { ok:false, error: "args is not defined" }; the card only reacts to ok:true, so the toolbar's
+// "清空全部选中" did nothing and reported nothing at all. Exercise all 15 handlers, and check
+// the behaviour rather than just "it answered".
+const SID_E = 'session-rpc-6666'
+sessions._m.set(SID_E, sessionWith(SID_E, WS))
+{
+  const internal = []
+  const results = {}
+  const call = async (m, a) => {
+    let res = null
+    try { res = (await rpc(m, Object.assign({ sessionId: SID_E }, a || {}))).result } catch (e) { internal.push(m + ' threw ' + ((e && e.message) || e)); return {} }
+    const msg = String((res && res.error) || '')
+    // A handler-level crash reads as a JS error; a legitimate refusal does not.
+    if (/is not defined|is not a function|Cannot read|undefined is not/.test(msg)) internal.push(m + ': ' + msg)
+    results[m] = res || {}
+    return res || {}
+  }
+  await call('createNote', { name: 'rpc测试', text: '# rpc测试\n第二行\n第三行\n' })
+  const st = await call('state', { revision: -1 })
+  await call('saveText', { text: '# rpc测试\n第二行改\n第三行\n', baseRevision: st.revision })
+  const added = await call('addSelection', { startLine: 1, startCol: 0, endLine: 1, endCol: 3, color: 'pink' })
+  const afterAdd = (await call('state', { revision: -1 })).selections || []
+  const cleared = await call('clearSelections')
+  const afterClear = (await call('state', { revision: -1 })).selections || []
+  await call('addSelection', { startLine: 2, startCol: 0, endLine: 2, endCol: 3, color: 'green' })
+  const cur = (await call('state', { revision: -1 })).selections || []
+  await call('removeSelection', { id: cur.length ? cur[0].id : 'sel-none' })
+  await call('commit', {})
+  await call('importNote', { text: '导入\n', mode: 'append' })
+  await call('renameNote', { from: 'rpc测试', to: 'rpc测试2' })
+  await call('listNotes', {})
+  await call('selectNote', { name: 'rpc测试2' })
+  await call('asset', { path: 'no/such/asset.js' })
+  await call('clearNote', {})
+  await call('deleteNote', { name: 'rpc测试2', confirm: true })
+  await call('reload', {})
+  // Every MUTATING handler answers { ok: true } when it is given a valid session and sane
+  // arguments — that is the contract the card codes against (it acts only on ok:true). A
+  // handler that crashes internally, or one that refuses for no visible reason, shows up here
+  // even when the mock swallows the thrown error. This is what clearSelections failed.
+  const mutating = ['createNote', 'saveText', 'addSelection', 'removeSelection', 'clearSelections', 'commit', 'importNote', 'renameNote', 'selectNote', 'clearNote', 'deleteNote', 'reload']
+  const notOk = mutating.filter((m) => results[m].ok !== true)
+  ok('every mutating RPC answers ok:true on a valid session',
+    notOk.length === 0,
+    notOk.length ? notOk.map((m) => m + ' -> ' + JSON.stringify(results[m])).join(' | ') : mutating.length + ' handlers answered ok')
+  ok('no RPC handler throws an internal error', internal.length === 0, internal.length ? internal.join(' | ') : '15 handlers called')
+  ok('addSelection then clearSelections really empties the list',
+    added.ok === true && afterAdd.length === 1 && cleared.ok === true && afterClear.length === 0,
+    JSON.stringify({ added: added.ok, afterAdd: afterAdd.length, cleared: cleared.ok, afterClear: afterClear.length, err: cleared.error || '' }))
+}
+
 console.log(failed === 0 ? '\nALL NOTE-MODEL CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')
 process.exit(failed === 0 ? 0 : 1)

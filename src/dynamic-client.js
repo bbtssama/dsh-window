@@ -1294,9 +1294,42 @@ return {
         }).catch(function (err) { notify('重载失败: ' + err.message) })
       }
       function clearSelections() {
+        // Two lessons from the "清空全部选中功能失效" report, both about failing silently:
+        // the host handler answered { ok:false, error:"args is not defined" } and this
+        // function only reacted to ok:true, so the button did nothing AND said nothing.
+        // Now a failure is always reported, and if the bulk RPC fails (an older host that
+        // still carries that bug) the entries are removed one by one instead, which works
+        // on any host. The id list comes from the HOST, not from this component's state:
+        // the rest of the call is answered by the host, so it may not agree with a state
+        // snapshot taken in an earlier render.
+        const done = function (out) {
+          revRef.current = out.revision
+          setSt(function (prev) { return prev ? Object.assign({}, prev, { revision: out.revision, selections: out.selections }) : prev })
+          notify('已清空全部选中')
+        }
+        // The shell surfaces a handler's { ok:false, error } as a REJECTED promise, not as a
+        // resolved value: with the original code (no .catch at all) the rejection was swallowed
+        // and the button did nothing and said nothing — the reported 功能失效. So the fallback
+        // hangs off both the refusal branch and the rejection branch.
+        const fallback = function (why) {
+          host.call('state', { revision: -1, sessionId: sidRef.current }).then(function (s) {
+            const ids = ((s && s.selections) || []).map(function (x) { return x.id })
+            if (!ids.length) { notify('清空失败: ' + (why || '未知原因')); return }
+            let chain = Promise.resolve(null)
+            for (let i = 0; i < ids.length; i++) {
+              const id = ids[i]
+              chain = chain.then(function () { return host.call('removeSelection', { id: id, sessionId: sidRef.current }) })
+            }
+            chain.then(function (last) {
+              if (last && last.ok) { done(last); return }
+              notify('清空失败: ' + ((last && last.error) || why || '未知原因'))
+            }).catch(function (err) { notify('清空失败: ' + ((err && err.message) || String(err))) })
+          }).catch(function (err) { notify('清空失败: ' + ((err && err.message) || String(err))) })
+        }
         host.call('clearSelections', { sessionId: sidRef.current }).then(function (r) {
-          if (r && r.ok) { revRef.current = r.revision; setSt(function (prev) { return prev ? Object.assign({}, prev, { revision: r.revision, selections: r.selections }) : prev }); notify('已清空全部选中') }
-        })
+          if (r && r.ok) { done(r); return }
+          fallback((r && r.error) || '')
+        }).catch(function (err) { fallback((err && err.message) || String(err)) })
       }
       function removeSelection(id) {
         host.call('removeSelection', { id: id, sessionId: sidRef.current }).then(function (r) {
