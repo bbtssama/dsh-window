@@ -204,6 +204,12 @@ return {
     // itself when this session HAS a note, otherwise only when it was summoned explicitly.
     // Without it a session with no notes would show an empty panel the user never asked for.
     let summoned = false
+    // A revision for state that is NOT the note text — the summon flag, the note list, the
+    // active note. The card polls `state` with the note revision and the host answered
+    // "unchanged" whenever the text matched, so `/window-note start` only took effect after a
+    // full page reload (the first request sends revision -1 and therefore always gets a full
+    // answer). Comparing this counter as well makes such changes land on the next poll.
+    let uiRev = 0
     // ── per-session stores ───────────────────────────────────────────────────────────
     // This plugin instance is shared by every session of the profile, so all of the state
     // above is really per session: the bound workspace, the open note, the loaded text and
@@ -221,7 +227,7 @@ return {
       return {
         sid: sid, base: '', baseFrom: '', confirmed: false, pathCache: null, loadedBase: '',
         policyCache: null, sessionId: sid, stateCorrupt: false,
-        activeNote: '', sessionNotes: null,
+        activeNote: '', sessionNotes: null, summoned: false, uiRev: 0,
         S: freshState(), diskVersions: new Map(), loading: null,
       }
     }
@@ -232,6 +238,7 @@ return {
       st.pathCache = pathCache; st.loadedBase = loadedBase; st.policyCache = policyCache
       st.sessionId = sessionId; st.stateCorrupt = stateCorrupt
       st.activeNote = activeNote; st.sessionNotes = sessionNotes
+      st.summoned = summoned; st.uiRev = uiRev
       st.S = S; st.diskVersions = diskVersions; st.loading = loading
     }
     function activate(sid) {
@@ -243,6 +250,7 @@ return {
       pathCache = st.pathCache; loadedBase = st.loadedBase; policyCache = st.policyCache
       sessionId = st.sessionId; stateCorrupt = st.stateCorrupt
       activeNote = st.activeNote; sessionNotes = st.sessionNotes
+      summoned = st.summoned === true; uiRev = intOr(st.uiRev, 0)
       S = st.S; diskVersions = st.diskVersions; loading = st.loading
       currentStore = st
       return st
@@ -539,6 +547,10 @@ return {
     }
     async function writeSessionState() {
       if (!sessionId) return
+      // The session file holds everything about a session that is not note text: the open
+      // note, the summon flag. Any write here is a change the card must hear about, so bump
+      // the UI revision in the same place instead of hunting for every caller.
+      uiRev += 1
       try {
         const payload = { v: SESSION_STATE_VERSION, sessionId: sessionId, active: activeNote || '', summoned: summoned === true, updatedAt: isoNow() }
         await writeAt(sessionStatePath(), JSON.stringify(payload, null, 2) + '\n')
@@ -792,6 +804,8 @@ return {
         // The card decides from these two whether it exists at all: a note, or an explicit
         // summon. `notes` rides along (see notesView) so the client can tell them apart.
         summoned: summoned === true,
+        // Non-content state revision, see `let uiRev`.
+        uiRevision: uiRev,
         error: S.error,
       }
     }
@@ -1510,7 +1524,11 @@ return {
       confirmed = true
       await ensureLoaded()
       const rev = args && typeof args.revision === 'number' ? args.revision : -1
-      if (rev === S.revision) return { unchanged: true, revision: S.revision }
+      // A client that does not send a uiRevision gets a full answer every time: correct, just
+      // chattier. The alternative (treating a missing value as "unchanged") is what made
+      // /window-note start/stop need a browser refresh.
+      const uiArg = args && typeof args.uiRevision === 'number' ? args.uiRevision : -1
+      if (rev === S.revision && uiArg === uiRev) return { unchanged: true, revision: S.revision, uiRevision: uiRev }
       // The panel needs full note rows (name, lines, commit), not just the names the
       // store keeps for itself — merging a name list over them rendered "undefined".
       const v = stateView(callerId)

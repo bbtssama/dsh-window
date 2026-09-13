@@ -376,6 +376,28 @@ sessions._m.set(SID_G, sessionWith(SID_G, WS))
   const s3 = await runCmd('nonsense', SID_G)
   ok('an unknown subcommand explains itself',
     s3 && s3.kind === 'error' && /start/.test(s3.text), JSON.stringify(s3 && s3.text))
+
+  // The card polls `state` with the note revision. Neither start nor stop touches the note
+  // text, so the host used to answer "unchanged" and the summon only took effect after a full
+  // page reload (whose first request sends revision -1). These two assertions are exactly that
+  // poll: one with a matching pair (skipped) and one after a summon (delivered).
+  await runCmd('stop', SID_G)
+  const base = (await rpc('state', { revision: -1, sessionId: SID_G })).result
+  const idlePoll = await rpc('state', { revision: base.revision, uiRevision: base.uiRevision, sessionId: SID_G })
+  ok('a poll with nothing changed is still skipped',
+    idlePoll.result && idlePoll.result.unchanged === true,
+    JSON.stringify(idlePoll.result && { unchanged: idlePoll.result.unchanged }))
+  await runCmd('start', SID_G)
+  const pollAfterSummon = await rpc('state', { revision: base.revision, uiRevision: base.uiRevision, sessionId: SID_G })
+  ok('summoning reaches the next poll, with no reload',
+    pollAfterSummon.result && pollAfterSummon.result.unchanged !== true &&
+    pollAfterSummon.result.summoned === true && pollAfterSummon.result.uiRevision > base.uiRevision,
+    JSON.stringify(pollAfterSummon.result && { unchanged: pollAfterSummon.result.unchanged, summoned: pollAfterSummon.result.summoned, ui: pollAfterSummon.result.uiRevision, was: base.uiRevision }))
+  await runCmd('stop', SID_G)
+  const pollAfterStop = await rpc('state', { revision: base.revision, uiRevision: pollAfterSummon.result.uiRevision, sessionId: SID_G })
+  ok('dismissing reaches the next poll too',
+    pollAfterStop.result && pollAfterStop.result.unchanged !== true && pollAfterStop.result.summoned === false,
+    JSON.stringify(pollAfterStop.result && { unchanged: pollAfterStop.result.unchanged, summoned: pollAfterStop.result.summoned }))
 }
 
 console.log('reading another note by name')
