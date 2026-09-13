@@ -1,7 +1,7 @@
 {
   "name": "dsh-window",
-  "version": "0.0.2",
-  "description": "Typora-like floating Markdown note window for the DeepSeek Harness web GUI: dock/drag/collapse, long-press text selection with persisted highlights, git-managed note, Mermaid rendering, and note_* model tools.",
+  "version": "0.0.3",
+  "description": "Floating Markdown note card for the DeepSeek Harness web GUI: per-session multi-note spaces, long-press highlighting with colours and your own remarks, reading-position memory, per-note git history, Mermaid rendering, and 23 note_* model tools that keep the agent's context cost low.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
