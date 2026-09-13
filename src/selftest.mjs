@@ -207,6 +207,23 @@ if (exists(installedManifest)) {
   try { JSON.parse(fs.readFileSync(installedManifest, 'utf8')) } catch (err) { why = String((err && err.message) || err) }
   ok('the installed package.json parses as JSON (dsh does this at boot)', why === '', why || 'ok')
 }
+// The profile runs the INSTALLED copy, so "the tests are green" only means something if that
+// copy is the one this build produced. It has been otherwise: a local diagnostic patched the
+// installed bundle with probe instrumentation (including a `throw`), and every check here kept
+// passing against a repo build the harness was not actually loading.
+const drifted = []
+for (const rel of ['lib/index.js', 'lib/client.js', 'package.json', 'cordis.patch.yml']) {
+  const a = path.join(repoRoot, rel)
+  const b = path.join(installedRoot, rel)
+  if (!exists(a) || !exists(b)) continue
+  if (!fs.readFileSync(a).equals(fs.readFileSync(b))) drifted.push(rel)
+}
+ok('the installed copy is byte-identical to this build', drifted.length === 0,
+  drifted.length ? 'differs: ' + drifted.join(', ') + ' — run: node src/install.mjs' : 'index.js / client.js / package.json / cordis.patch.yml')
+const installedHostSrc = fs.readFileSync(path.join(installedRoot, 'lib', 'index.js'), 'utf8')
+const probeMarkers = ['DWPROBE', '__PROBE', 'probe.log'].filter((m) => installedHostSrc.indexOf(m) >= 0)
+ok('the installed host carries no probe instrumentation', probeMarkers.length === 0, probeMarkers.join(',') || 'clean')
+
 
 const unknown = await rpc('no_such_method', {})
 ok('answers an unknown method with 404 + ok:false', unknown.status === 404 && unknown.parsed && unknown.parsed.ok === false, unknown.raw.slice(0, 90))
