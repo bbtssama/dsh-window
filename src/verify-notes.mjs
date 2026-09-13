@@ -432,6 +432,7 @@ sessions._m.set(SID_E, sessionWith(SID_E, WS))
   await call('addSelection', { startLine: 2, startCol: 0, endLine: 2, endCol: 3, color: 'green' })
   const cur = (await call('state', { revision: -1 })).selections || []
   await call('removeSelection', { id: cur.length ? cur[0].id : 'sel-none' })
+  await call('saveView', { line: 2, anchor: '第二行改' })
   await call('commit', {})
   await call('importNote', { text: '导入\n', mode: 'append' })
   await call('renameNote', { from: 'rpc测试', to: 'rpc测试2' })
@@ -445,15 +446,57 @@ sessions._m.set(SID_E, sessionWith(SID_E, WS))
   // arguments — that is the contract the card codes against (it acts only on ok:true). A
   // handler that crashes internally, or one that refuses for no visible reason, shows up here
   // even when the mock swallows the thrown error. This is what clearSelections failed.
-  const mutating = ['createNote', 'saveText', 'addSelection', 'removeSelection', 'clearSelections', 'commit', 'importNote', 'renameNote', 'selectNote', 'clearNote', 'deleteNote', 'reload']
+  const mutating = ['createNote', 'saveText', 'addSelection', 'removeSelection', 'clearSelections', 'saveView', 'commit', 'importNote', 'renameNote', 'selectNote', 'clearNote', 'deleteNote', 'reload']
   const notOk = mutating.filter((m) => results[m].ok !== true)
   ok('every mutating RPC answers ok:true on a valid session',
     notOk.length === 0,
     notOk.length ? notOk.map((m) => m + ' -> ' + JSON.stringify(results[m])).join(' | ') : mutating.length + ' handlers answered ok')
-  ok('no RPC handler throws an internal error', internal.length === 0, internal.length ? internal.join(' | ') : '15 handlers called')
+  ok('no RPC handler throws an internal error', internal.length === 0, internal.length ? internal.join(' | ') : '16 handlers called')
   ok('addSelection then clearSelections really empties the list',
     added.ok === true && afterAdd.length === 1 && cleared.ok === true && afterClear.length === 0,
     JSON.stringify({ added: added.ok, afterAdd: afterAdd.length, cleared: cleared.ok, afterClear: afterClear.length, err: cleared.error || '' }))
+}
+
+console.log('the reading position')
+// Every note remembers the line the reader had reached, silently, and switching notes (or
+// coming back later) resumes in place. Per note means per note: one note's position must
+// never leak into another.
+const SID_F = 'session-view-7777'
+sessions._m.set(SID_F, sessionWith(SID_F, WS))
+{
+  const r = async (m, a) => (await rpc(m, Object.assign({ sessionId: SID_F }, a || {}))).result || {}
+  const body = (n) => { const out = []; for (let i = 1; i <= n; i++) out.push('行 ' + i); return out.join('\n') + '\n' }
+  await r('createNote', { name: '甲', text: body(80) })
+  await r('saveView', { line: 40, anchor: '行 40' })
+  const inA = await r('state', { revision: -1 })
+  const fileA = noteDirOf(SID_F, '甲') + '/.note-view.json'
+  const ignored = String(files.get(k(noteDirOf(SID_F, '甲') + '/.gitignore')) || '')
+  await r('createNote', { name: '乙', text: body(10) })
+  const inB = await r('state', { revision: -1 })
+  await r('saveView', { line: 3, anchor: '行 3' })
+  const back = await r('state', { revision: -1 })
+  await r('selectNote', { name: '甲' })
+  const againA = await r('state', { revision: -1 })
+  ok('a note remembers the line it was left at',
+    inA.view && inA.view.line === 40 && inA.view.anchor === '行 40',
+    JSON.stringify(inA.view))
+  ok('it is written to the note directory, not into the note text',
+    files.has(k(fileA)) && /"line": 40/.test(String(files.get(k(fileA)))) && !/'行 40'/.test(String(files.get(k(noteDirOf(SID_F, '甲') + '/note.md')))),
+    fileA)
+  ok('the position is kept out of the note git repo',
+    ignored.indexOf('.note-view.json') >= 0,
+    JSON.stringify(ignored))
+  ok('a note that was never opened has no position of its own',
+    inB.view === null || inB.view === undefined,
+    JSON.stringify(inB.view))
+  ok('each note keeps its own position',
+    back.view && back.view.line === 3 && againA.view && againA.view.line === 40,
+    JSON.stringify({ b: back.view && back.view.line, a: againA.view && againA.view.line }))
+  await r('saveView', { line: 0, anchor: 'x' })
+  const clamped = await r('state', { revision: -1 })
+  ok('a nonsense line is clamped instead of stored',
+    clamped.view && clamped.view.line === 1,
+    JSON.stringify(clamped.view))
 }
 
 console.log(failed === 0 ? '\nALL NOTE-MODEL CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')

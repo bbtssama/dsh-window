@@ -11,6 +11,12 @@ let NOTE_FILE = 'note.md'
 const SESSION_FILE = '.session.json'
 const STATE_FILE = '.note-state.json'
 const BAD_STATE_FILE = '.note-state.bad.json'
+// Where the reader had got to in this note (a line number plus a short anchor). It is a
+// separate file on purpose: the selection state is written under a version guard, and a
+// scroll position is written far more often and must never fight that guard. It is also
+// added to the note's own .gitignore, so a reading position never shows up in the note's
+// history as a commit.
+const VIEW_FILE = '.note-view.json'
 const STATE_VERSION = 1
 const SESSION_STATE_VERSION = 1
 const MAX_NAME_LEN = 48
@@ -302,6 +308,7 @@ return {
           note: dir + '/' + NOTE_FILE,
           state: dir + '/' + STATE_FILE,
           bad: dir + '/' + BAD_STATE_FILE,
+          view: dir + '/' + VIEW_FILE,
           session: sroot ? sroot + '/' + SESSION_FILE : '',
           name: name,
         }
@@ -598,6 +605,7 @@ return {
       const p = paths()
       S.text = ''
       S.selections = []
+      S.view = null
       S.fileExists = false
       // No active note is a normal state now (a session starts with none), not an error:
       // the card shows its empty state and the tools report "create one first".
@@ -636,6 +644,18 @@ return {
           }
         }
       } catch (err) { fail('读取选中记录', err) }
+      // Where the reader had got to. Absent or damaged simply means "no saved position",
+      // which is not worth an error: the card then starts at the top as before.
+      S.view = null
+      try {
+        const rawView = await readIfExists(p.view)
+        if (rawView !== null) {
+          let pv = null
+          try { pv = JSON.parse(rawView) } catch (err) { pv = null }
+          const line = pv && Number.isFinite(Number(pv.line)) ? Math.round(Number(pv.line)) : 0
+          if (line >= 1) S.view = { line: line, anchor: typeof pv.anchor === 'string' ? pv.anchor : '', updatedAt: typeof pv.updatedAt === 'string' ? pv.updatedAt : '' }
+        }
+      } catch (err) { }
       if (canWrite()) await ensureGit()
     }
     function ensureLoaded() {
@@ -659,6 +679,38 @@ return {
       }
       const payload = { v: STATE_VERSION, seq: S.seq, selections: S.selections, updatedAt: isoNow() }
       await writeAt(paths().state, JSON.stringify(payload, null, 2) + '\n')
+    }
+    /**
+     * Keep the reading position out of the note's git history. The note repo commits with
+     * `git add -A`, so without an ignore rule every scroll position would become a commit
+     * the next time the user commits the note. Created on demand and never surfaced: a
+     * failure just means the position may get committed, which is cosmetic.
+     */
+    async function ensureViewIgnored() {
+      if (fs === undefined) return
+      try {
+        const gi = paths().dir + '/.gitignore'
+        const raw = await readIfExists(gi)
+        const cur = raw === null ? '' : String(raw)
+        if (cur.indexOf(VIEW_FILE) >= 0) return
+        const head = cur === '' ? '' : cur.replace(/\s*$/, '') + '\n'
+        await writeAt(gi, head + VIEW_FILE + '\n')
+      } catch (err) { }
+    }
+    /** Persist where the reader is in the active note. Silent by design. */
+    async function saveView(input) {
+      const a = input || {}
+      const line = Math.max(1, intOr(a.line, 1))
+      const anchor = typeof a.anchor === 'string' ? a.anchor.slice(0, 80) : ''
+      S.view = { line: line, anchor: anchor, updatedAt: isoNow() }
+      if (fs === undefined || !canWrite() || !activeNote) return { ok: true, line: line }
+      await ensureViewIgnored()
+      const payload = { v: 1, line: line, anchor: anchor, updatedAt: S.view.updatedAt }
+      // No version guard: a reading position is last-writer-wins, and it must never
+      // conflict with the guarded selection state (that conflict is what
+      // FS_STALE_VERSION means).
+      await writeAt(paths().view, JSON.stringify(payload, null, 2) + '\n')
+      return { ok: true, line: line }
     }
     function viewSelections() {
       const out = []
@@ -689,6 +741,7 @@ return {
           active: '',
           notesDir: '',
           inactive: true,
+          view: null,
         }
       }
       return {
@@ -696,6 +749,9 @@ return {
         text: S.text,
         lineCount: linesOf(S.text).length,
         selections: viewSelections(),
+        // The reading position travels with every state answer, so switching a note (and a
+        // page reload, which asks for the state again) gets it for free.
+        view: S.view || null,
         path: activeNote ? paths().note : '',
         relPath: activeNote ? (ROOT_DIR + '/' + NOTES_DIR + '/' + sessionId + '/' + activeNote + '/' + NOTE_FILE) : '',
         notesDir: sessionRoot(),
@@ -1446,6 +1502,17 @@ return {
         S.revision += 1
         try { await persistState() } catch (err) { fail('写入选中记录', err) }
         return { ok: true, revision: S.revision, selections: viewSelections() }
+      })
+    })
+    // Where the reader is, so switching notes (or coming back tomorrow) resumes in place.
+    // Deliberately NOT part of the guarded selection state and not a revision bump: it is
+    // written silently, often, and must not disturb the text/selection bookkeeping.
+    handleLocked('saveView', async function (args) {
+      if (!bindSession(args && args.sessionId)) return notMine('saveView')
+      confirmed = true
+      await ensureLoaded()
+      return await withNoteLock(noteLockKey(), async function () {
+        try { return await saveView(args) } catch (err) { return { ok: false, error: '写入阅读位置失败: ' + ((err && err.message) || String(err)) } }
       })
     })
     // `args` MUST be declared: this handler was the only one without the parameter, so
