@@ -1741,17 +1741,34 @@ return {
       function topVisibleLine() {
         const host = bodyRef.current
         if (!host) return 0
-        const bands = lineBands().byLine
-        const keys = Object.keys(bands)
-        if (!keys.length) return 0
         const edge = host.scrollTop + 4
-        let best = 0, bestTop = Infinity
-        for (let i = 0; i < keys.length; i++) {
-          const b = bands[keys[i]]
-          if (!b || b.bottom < edge) continue
-          if (b.top < bestTop) { bestTop = b.top; best = Number(keys[i]) }
+        const pick = function (bands) {
+          let best = 0, bestTop = Infinity
+          for (let i = 0; i < bands.length; i++) {
+            const b = bands[i]
+            if (!b || b.bottom < edge) continue
+            if (b.top < bestTop) { bestTop = b.top; best = b.line }
+          }
+          return best
         }
-        return best
+        const cached = pick(lineBands().bands)
+        if (cached) return cached
+        // The band cache is keyed by the geometry version, so a click landing between a scroll
+        // and the render that follows it can read a set that no longer covers the viewport —
+        // that miss made the caret land on line 1 instead of the paragraph being read
+        // ("编辑功能定位仍有问题"). Re-measure the mounted lines directly; one pass, only on the
+        // rare miss, and the answer is exact instead of empty.
+        const keys = Object.keys(lineEls.current)
+        const o = bodyOrigin()
+        const fresh = []
+        for (let i = 0; i < keys.length; i++) {
+          const el = lineEls.current[keys[i]]
+          if (!el || !el.isConnected) continue
+          const r = el.getBoundingClientRect()
+          if (r.height <= 0) continue
+          fresh.push({ line: Number(keys[i]), top: r.top - o.top, bottom: r.bottom - o.top })
+        }
+        return pick(fresh)
       }
       function saveViewNow() {
         if (viewSaveTimerRef.current !== null) { try { window.clearTimeout(viewSaveTimerRef.current) } catch (err) { } viewSaveTimerRef.current = null }
