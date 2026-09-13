@@ -347,6 +347,37 @@ ok('opening a missing note is an error, not a crash', r5 && r5.kind === 'error',
 ok('the command did not leak into another session',
   (await asTool('note_list', {}, SID_A)).notes.every((n) => n.name !== '论文'), 'session A untouched')
 
+console.log('summoning the card in a session with no notes')
+// The card's rule: it loads for a session that HAS a note, otherwise only when summoned
+// explicitly. `start` is that explicit ask, and it has to survive a reload, so the flag is
+// part of the session file rather than of the process.
+const SID_G = 'session-summon-8888'
+sessions._m.set(SID_G, sessionWith(SID_G, WS))
+{
+  const st0 = await rpc('state', { revision: -1, sessionId: SID_G })
+  ok('an empty session is not summoned by default',
+    st0.result && st0.result.summoned === false && (st0.result.notes || []).length === 0,
+    JSON.stringify({ summoned: st0.result && st0.result.summoned, notes: st0.result && (st0.result.notes || []).length }))
+  const s1 = await runCmd('start', SID_G)
+  ok('start summons the card', s1 && s1.kind === 'success', JSON.stringify(s1 && s1.text))
+  const st1 = await rpc('state', { revision: -1, sessionId: SID_G })
+  ok('the state says it was summoned, with still no note created',
+    st1.result && st1.result.summoned === true && (st1.result.notes || []).length === 0,
+    JSON.stringify({ summoned: st1.result && st1.result.summoned, notes: st1.result && (st1.result.notes || []).length }))
+  const sessFile = WS + NEST + SID_G + '/' + '.session.json'
+  const raw = String(files.get(k(sessFile)) || '')
+  ok('the summon is written to the session file, so a reload keeps it',
+    /"summoned": true/.test(raw), raw.slice(0, 120))
+  const s2 = await runCmd('stop', SID_G)
+  const st2 = await rpc('state', { revision: -1, sessionId: SID_G })
+  ok('stop dismisses it again',
+    s2 && s2.kind === 'success' && st2.result && st2.result.summoned === false,
+    JSON.stringify({ kind: s2 && s2.kind, summoned: st2.result && st2.result.summoned }))
+  const s3 = await runCmd('nonsense', SID_G)
+  ok('an unknown subcommand explains itself',
+    s3 && s3.kind === 'error' && /start/.test(s3.text), JSON.stringify(s3 && s3.text))
+}
+
 console.log('reading another note by name')
 // The agent must be able to inspect note B while the card keeps showing note A.
 const activeBefore = (await tools.get('note_list').execute({}, { agent: { session: sessionWith(SID_A, WS) } })).active

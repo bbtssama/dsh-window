@@ -1833,6 +1833,12 @@ return {
       }
       if (!st) return null
       if (st.sessionId && sidRef.current && st.sessionId !== sidRef.current) return null
+      // The card loads for a session that HAS a note, or when the user summoned it
+      // explicitly with `/window-note start` (st.summoned, remembered per session). Any
+      // other session with no notes gets nothing at all — no panel, no pill. A host that
+      // predates `summoned` simply reports nothing, and the rule collapses to "has a note",
+      // which is the same behaviour it had before.
+      if (!(notes.length > 0) && st.summoned !== true) return null
       if (hidden) {
         return h('button', { className: 'dn-pill', title: '展开笔记卡片', onClick: function () { setHidden(false) }, 'data-note-pill': '' }, [
           h('span', { key: 'i' }, '\ud83d\udcdd'), h('span', { key: 't' }, '笔记'),

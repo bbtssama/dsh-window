@@ -186,6 +186,10 @@ return {
     // '' means "this session has no note yet".
     let activeNote = ''
     let sessionNotes = null
+    // True only after `/window-note start` (or `stop` to undo it). The card's rule is: show
+    // itself when this session HAS a note, otherwise only when it was summoned explicitly.
+    // Without it a session with no notes would show an empty panel the user never asked for.
+    let summoned = false
     // ── per-session stores ───────────────────────────────────────────────────────────
     // This plugin instance is shared by every session of the profile, so all of the state
     // above is really per session: the bound workspace, the open note, the loaded text and
@@ -510,6 +514,9 @@ return {
         if (raw !== null) parsed = JSON.parse(raw)
       } catch (err) { parsed = null }
       const want = parsed && typeof parsed.active === 'string' ? sanitizeNoteName(parsed.active) : ''
+      // Whether the card was summoned explicitly with /window-note start. It is remembered
+      // per session so a reload does not lose the panel in a session that has no note yet.
+      summoned = !!(parsed && parsed.summoned === true)
       const names = await listNoteDirs()
       sessionNotes = names
       if (want && names.indexOf(want) >= 0) activeNote = want
@@ -519,7 +526,7 @@ return {
     async function writeSessionState() {
       if (!sessionId) return
       try {
-        const payload = { v: SESSION_STATE_VERSION, sessionId: sessionId, active: activeNote || '', updatedAt: isoNow() }
+        const payload = { v: SESSION_STATE_VERSION, sessionId: sessionId, active: activeNote || '', summoned: summoned === true, updatedAt: isoNow() }
         await writeAt(sessionStatePath(), JSON.stringify(payload, null, 2) + '\n')
       } catch (err) { fail('写入会话状态', err) }
     }
@@ -768,6 +775,9 @@ return {
         stateVersion: S.stateVersion,
         shellOk: shell !== undefined,
         fsOk: fs !== undefined,
+        // The card decides from these two whether it exists at all: a note, or an explicit
+        // summon. `notes` rides along (see notesView) so the client can tell them apart.
+        summoned: summoned === true,
         error: S.error,
       }
     }
@@ -1582,7 +1592,7 @@ return {
             commandCtx.commands.register({
               name: 'window-note',
               description: '打开本会话的笔记卡片（每个会话一份独立的笔记空间）',
-              input: { hint: '[list | new <名字> | open <名字>]' },
+              input: { hint: '[list | new <名字> | open <名字> | start | stop]' },
               handler: function (invocation) {
                 const sid = sessionIdOfExec({ agent: invocation && invocation.agent })
                 if (!sid) return { kind: 'error', text: '拿不到本会话的 session id，无法打开笔记空间。' }
@@ -1619,7 +1629,19 @@ return {
                     if (!r.ok) return { kind: 'error', text: '打开失败：' + r.error }
                     return { kind: 'success', text: '已打开《' + activeNote + '》。' }
                   }
-                  return { kind: 'error', text: '用法：/window-note [list | new <名字> | open <名字>]' }
+                  if (sub === 'start' || sub === 'stop') {
+                    // Summon (or dismiss) the card itself, without touching any note. This is
+                    // the only way to get the button in a session that has no note yet.
+                    summoned = sub === 'start'
+                    await writeSessionState()
+                    return {
+                      kind: 'success',
+                      text: summoned
+                        ? '笔记卡片已出现（本会话' + (activeNote ? '当前打开《' + activeNote + '》' : '还没有笔记，点卡片里的[新建]即可') + '）。不想看时用 /window-note stop 收起。'
+                        : '笔记卡片已收起（本会话的笔记与划线都没有动）。',
+                    }
+                  }
+                  return { kind: 'error', text: '用法：/window-note [list | new <名字> | open <名字> | start | stop]' }
                 })
               },
             })
