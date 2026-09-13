@@ -27,6 +27,12 @@ const MAX_IMPORT_BYTES = 8 * 1024 * 1024
 // Highlight colour a selection carries. Agent-visible enum; the client paints it
 // as an overlay behind the text, so overlapping ranges simply blend.
 const COLORS = { yellow: 1, pink: 1, green: 1, black: 1 }
+/**
+ * How a mark is drawn. `highlight` is the classic translucent wash over the text; the two
+ * others mark a passage *in the text itself* (italic / underlined glyphs) instead of behind
+ * it, so one passage can carry two different intentions without a second colour.
+ */
+const STYLES = { highlight: 1, italic: 1, underline: 1 }
 const SEED_TEXT = '# 我的知识笔记\n\n> 在对话里向 DeepSeek 提知识性问题，讲解会自动写进这份笔记。\n> 在卡片里长按文本可以「选中」重点，选中的内容会以荧光标出并同步给 AI。\n'
 const SECTION_NAME = 'dsh-window'
 const B64T = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
@@ -102,6 +108,7 @@ function normalizeSel(raw) {
     fetched: raw.fetched === true,
     stale: raw.stale === true,
     color: COLORS[raw.color] ? raw.color : 'yellow',
+    style: STYLES[raw.style] ? raw.style : 'highlight',
     // A remark the reader typed about this passage ("this is the part I keep forgetting",
     // "ask about this in the interview"). Free text, delivered to the agent together with
     // the selection: it is the one field that carries the user's own words.
@@ -762,7 +769,7 @@ return {
       const out = []
       for (let i = 0; i < S.selections.length; i++) {
         const s = S.selections[i]
-        out.push({ id: s.id, order: i + 1, seq: s.seq, text: s.text, startLine: s.startLine, startCol: s.startCol, endLine: s.endLine, endCol: s.endCol, createdAt: s.createdAt, color: s.color || 'yellow', fetched: s.fetched === true, stale: s.stale === true, remark: s.remark || '' })
+        out.push({ id: s.id, order: i + 1, seq: s.seq, text: s.text, startLine: s.startLine, startCol: s.startCol, endLine: s.endLine, endCol: s.endCol, createdAt: s.createdAt, color: s.color || 'yellow', style: s.style || 'highlight', fetched: s.fetched === true, stale: s.stale === true, remark: s.remark || '' })
       }
       return out
     }
@@ -871,7 +878,7 @@ return {
       const text = sliceRange(S.text, { startLine: first.line, startCol: first.col, endLine: last.line, endCol: last.col })
       if (text.trim() === '') return { ok: false, reason: 'empty', revision: S.revision, selections: viewSelections() }
       S.seq += 1
-      const sel = { id: 'sel-' + S.seq, seq: S.seq, startLine: first.line, startCol: first.col, endLine: last.line, endCol: last.col, text: text, createdAt: isoNow(), color: COLORS[a.color] ? a.color : 'yellow', fetched: false, stale: false, remark: cleanRemark(a.remark) }
+      const sel = { id: 'sel-' + S.seq, seq: S.seq, startLine: first.line, startCol: first.col, endLine: last.line, endCol: last.col, text: text, createdAt: isoNow(), color: COLORS[a.color] ? a.color : 'yellow', style: STYLES[a.style] ? a.style : 'highlight', fetched: false, stale: false, remark: cleanRemark(a.remark) }
       S.selections = sortSelections(S.selections.concat([sel]))
       S.revision += 1
       try { await persistState() } catch (err) { fail('写入选中记录', err) }
@@ -881,6 +888,40 @@ return {
      * Set (or clear) the remark of one selection. A remark is metadata about a passage the
      * user already selected, so this is a targeted update rather than a new selection.
      */
+    /**
+     * Change how one existing mark is drawn — its colour, its style, or both. The colour
+     * palette and the italic/underline styles are two dimensions of the same mark, so one
+     * targeted update covers every button on the reader's function card. An empty string
+     * means "leave this dimension alone"; a value that is not in the table is refused rather
+     * than silently coerced, because a wrong colour is worse than a refusal.
+     */
+    async function setMarkLook(id, color, style) {
+      await ensureLoaded()
+      const want = String(id || '')
+      const hasColor = color !== undefined && color !== null && color !== ''
+      const hasStyle = style !== undefined && style !== null && style !== ''
+      if (!hasColor && !hasStyle) return { ok: false, found: false, error: 'color 和 style 至少要给一个', revision: S.revision, selections: viewSelections() }
+      const wantColor = hasColor ? (COLORS[color] ? color : '') : ''
+      const wantStyle = hasStyle ? (STYLES[style] ? style : '') : ''
+      if ((hasColor && wantColor === '') || (hasStyle && wantStyle === '')) {
+        return { ok: false, found: false, error: 'color 只能是 yellow/pink/green/black，style 只能是 highlight/italic/underline', revision: S.revision, selections: viewSelections() }
+      }
+      let found = false
+      let outColor = ''
+      let outStyle = ''
+      for (let i = 0; i < S.selections.length; i++) {
+        const s = S.selections[i]
+        if (s.id !== want) continue
+        found = true
+        if (wantColor !== '' && (s.color || 'yellow') !== wantColor) { s.color = wantColor; S.revision += 1 }
+        if (wantStyle !== '' && (s.style || 'highlight') !== wantStyle) { s.style = wantStyle; S.revision += 1 }
+        outColor = s.color || 'yellow'
+        outStyle = s.style || 'highlight'
+      }
+      if (!found) return { ok: false, found: false, error: '没有这条标记记录: ' + want, revision: S.revision, selections: viewSelections() }
+      try { await persistState() } catch (err) { fail('写入标记记录', err) }
+      return { ok: true, found: true, id: want, color: outColor, style: outStyle, revision: S.revision, selections: viewSelections() }
+    }
     async function setRemark(id, raw) {
       await ensureLoaded()
       const want = String(id || '')
@@ -924,7 +965,7 @@ return {
         // The colour is part of the message the agent receives: it is the intent
         // channel (yellow focus / pink question / green done / black masked), so it
         // has to appear in the text render, not only in the stored object.
-        const head = '#' + s.order + ' [' + s.id + '] ' + ({ yellow: '黄', pink: '粉', green: '绿', black: '黑' }[s.color] || '黄') + ' 第' + s.startLine + '行:' + s.startCol + ' → 第' + s.endLine + '行:' + s.endCol + (s.fetched ? ' （已取用）' : ' （新选中）') + (s.stale ? ' [!]原文已变动' : '')
+        const head = '#' + s.order + ' [' + s.id + '] ' + ({ yellow: '黄', pink: '粉', green: '绿', black: '黑' }[s.color] || '黄') + ({ italic: '·斜体', underline: '·下划线' }[s.style] || '') + ' 第' + s.startLine + '行:' + s.startCol + ' → 第' + s.endLine + '行:' + s.endCol + (s.fetched ? ' （已取用）' : ' （新标记）') + (s.stale ? ' [!]原文已变动' : '')
         // The remark is the user's own words about this passage, so it travels with the
         // selection text into every prompt — that is the whole point of the field.
         const remark = typeof s.remark === 'string' && s.remark !== '' ? '\n  【备注】' + s.remark.split('\n').join('\n  ') : ''
@@ -941,6 +982,9 @@ return {
         createdAt: { type: 'string', required: true }, fetched: { type: 'boolean', required: true },
         stale: { type: 'boolean', required: true }, text: { type: 'string', required: true },
         color: { type: 'string', required: true },
+        // How the mark is drawn: highlight (translucent wash) / italic / underline. Always
+        // present, so a caller can branch on it without checking for the field.
+        style: { type: 'string', required: true },
         // The reader's own note about this passage. Always present (empty string when there
         // is none) so the agent never has to guess whether the field exists.
         remark: { type: 'string', required: true },
@@ -1178,7 +1222,7 @@ return {
     registerToolLocked(harness.defineTool({
       name: 'note_take_new_selections',
       description: '领取用户自上次领取之后新划选的内容(只返回 fetched=false 的对象，并立即把它们标记为已取用，避免重复返回)。回答用户问题前应先调用它，看看用户新划了哪些重点。',
-      parameters: { note: { type: 'string', description: '取哪一份笔记的新划线（默认当前打开的）' } },
+      parameters: { note: { type: 'string', description: '取哪一份笔记的新标记（默认当前打开的）' } },
       output: { schema: { type: 'array', items: SEL_ITEM }, render: function (a, v) { return [{ type: 'text', text: v.length ? ('用户新选中了 ' + v.length + ' 段:\n\n' + selRender(v)) : '(没有新的选中内容)' }] } },
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
@@ -1644,6 +1688,17 @@ return {
         return { ok: r.ok === true, found: r.found === true, id: String((args && args.id) || ''), remark: typeof r.remark === 'string' ? r.remark : '', revision: r.revision, selections: r.selections, error: r.ok ? '' : String(r.error || '') }
       })
     })
+    // The reader's function card on a mark: change its colour, its style, or both. One RPC for
+    // every button, because the store treats both as fields of the same record.
+    handleLocked('setMarkLook', async function (args) {
+      if (!bindSession(args && args.sessionId)) return notMine('setMarkLook')
+      confirmed = true
+      await ensureLoaded()
+      return await withNoteLock(noteLockKey(), async function () {
+        const r = await setMarkLook(args && args.id, args && args.color, args && args.style)
+        return { ok: r.ok === true, found: r.found === true, id: String((args && args.id) || ''), color: typeof r.color === 'string' ? r.color : '', style: typeof r.style === 'string' ? r.style : '', revision: r.revision, selections: r.selections, error: r.ok ? '' : String(r.error || '') }
+      })
+    })
     // Where the reader is, so switching notes (or coming back tomorrow) resumes in place.    // Deliberately NOT part of the guarded selection state and not a revision bump: it is
     // written silently, often, and must not disturb the text/selection bookkeeping.
     handleLocked('saveView', async function (args) {
@@ -1658,7 +1713,7 @@ return {
     // `args && args.sessionId` threw a ReferenceError inside the handler and every call
     // answered { ok:false, error:"args is not defined" }. The card only reacts to ok:true,
     // so the button did nothing at all and said nothing — the reported
-    // "清空全部选中功能失效". verify-notes now calls all 15 RPCs so this cannot come back.
+    // "清空全部标记功能失效". verify-notes now calls all 15 RPCs so this cannot come back.
     handleLocked('clearSelections', async function (args) {
       if (!bindSession(args && args.sessionId)) return notMine('clearSelections')
       confirmed = true
@@ -1767,7 +1822,7 @@ return {
                       kind: 'success',
                       text: summoned
                         ? '笔记卡片已出现（本会话' + (activeNote ? '当前打开《' + activeNote + '》' : '还没有笔记，点卡片里的[新建]即可') + '）。不想看时用 /window-note stop 收起。'
-                        : '笔记卡片已收起（本会话的笔记与划线都没有动）。',
+                        : '笔记卡片已收起（本会话的笔记与标记都没有动）。',
                     }
                   }
                   return { kind: 'error', text: '用法：/window-note [list | new <名字> | open <名字> | start | stop]' }
@@ -1791,16 +1846,17 @@ return {
               '{{dsh_window_note_scope}}',
               '工作方式(仅当你归属于这张卡片时适用):',
               '- 用户问知识性问题、要求讲解/总结/整理时，不要只在对话里长篇回复: 用 `note_write`(默认追加)把讲解写进笔记，内容会立刻显示在卡片里，用户就不必往上翻聊天记录。对话里只留简短的口头交付与要点提示。',
-              '- 每次回答用户之前，先调用 `note_take_new_selections`: 它返回用户自上次取用以来新划选的重点(含行号与原文)，并把这些对象标记为已取用。用户划线往往就是"这里我不懂/我要你展开"。',
-              '- 需要回顾全部划线时用 `note_get_selections`; 需要笔记全文(含行号)时用 `note_read`，也可以直接用 `read` 工具读该文件。',
+              '- 每次回答用户之前，先调用 `note_take_new_selections`: 它返回用户自上次取用以来新标记的重点(含行号与原文)，并把这些对象标记为已取用。用户标记往往就是"这里我不懂/我要你展开"。',
+              '- 需要回顾全部标记时用 `note_get_selections`; 需要笔记全文(含行号)时用 `note_read`，也可以直接用 `read` 工具读该文件。',
               '- 用户在卡片里手动编辑会立刻落盘; 点"保存"按钮会 git 提交。你写入后默认也会自动提交一次。',
               '- 卡片支持图片：`![alt](./x.png)` 这类本地相对路径会由 host 读成 data URL 渲染；在线 http(s) 图片直接渲染。引用整张图时，选中范围会自动吸附到整段图片语法。',
               '- 代码块按语言做语法高亮；`mermaid` 代码块会渲染成图（支持 graph/flowchart 的 TD/TB/LR/RL 分层图），其余图种降级为源码卡片。',
-              '- 行号是 1 基，列号是 0 基，都以该行文本为基准。引用划线内容时请原样引用，不要编造用户没有划过的内容。',
+              '- 行号是 1 基，列号是 0 基，都以该行文本为基准。引用标记内容时请原样引用，不要编造用户没有划过的内容。',
               '- 改一小段就用 `note_patch`（按区间替换，不必输出全文）；多处一起改用 `note_patch_many`（内部从后往前应用）。',
               '- 要定位"关于某话题的那段"用 `note_find`，拿到行号列号后直接 `note_patch`，不要先读全文；只读窗口用 `note_read({fromLine,toLine,padding})`。',
-              '- 你也能管理划线：`note_add_selection`（新建，可指定颜色）/ `note_remove_selection` / `note_set_color` / `note_clear_selections`。',
-              '- 颜色即意图：yellow=重点、pink=疑问（要我展开）、green=已确认/已处理、black=遮盖（这段不要引用也不要复述）。处理完一条划线后，可用 `note_set_color` 把它转成 green 作为闭环信号。',
+              '- 你也能管理标记：`note_add_selection`（新建，可指定颜色与样式）/ `note_remove_selection` / `note_set_color` / `note_set_style` / `note_clear_selections`。',
+              '- 颜色即意图：yellow=重点、pink=疑问（要我展开）、green=已确认/已处理、black=遮盖（这段不要引用也不要复述）。处理完一条标记后，可用 `note_set_color` 把它转成 green 作为闭环信号。',
+              '- 样式即另一条通道：highlight（默认，荧光底色）之外还有 italic（斜体）与 underline（下划线），它们直接改文字本身、不抢注意力，同一段文字可以同时挂底色标记和斜体标记。',
             ].join('\n'),
           })
         })
@@ -1824,7 +1880,7 @@ return {
               const st = stores.get(sid)
               if (!st) return '本会话的笔记空间：未加载。只有在用户明确要求记录/整理笔记、或用 /window-note 打开之后，才用 note_list / note_create 开始。'
               if (st.activeNote) {
-                return '本会话的笔记空间：**已打开《' + st.activeNote + '》**（本会话共 ' + String((st.sessionNotes || []).length) + ' 份笔记，目录 ' + st.base + '/' + ROOT_DIR + '/' + NOTES_DIR + '/' + sid + '）。下面的工作方式全部适用，包括回答前先取用户的新划线。'
+                return '本会话的笔记空间：**已打开《' + st.activeNote + '》**（本会话共 ' + String((st.sessionNotes || []).length) + ' 份笔记，目录 ' + st.base + '/' + ROOT_DIR + '/' + NOTES_DIR + '/' + sid + '）。下面的工作方式全部适用，包括回答前先取用户的新标记。'
               }
               return '本会话的笔记空间：**本会话还没有笔记**。不要主动创建；只有用户明确要求记笔记时，才用 note_create 建一份（或用 /window-note 打开面板）。'
             })
@@ -1833,10 +1889,12 @@ return {
       } catch (err) { fail('注册段落失败', err) }
     }
 
-    // ── 协同工具：精确写入 / 搜索 / 划线管理 ────────────────────────────────
+    // ── 协同工具：精确写入 / 搜索 / 标记管理 ────────────────────────────────
     // 全部复用上面的 helper，所以位置换算、重新锚定、落盘与 git 语义完全一致。
     const COLOR_SET = { yellow: 1, pink: 1, green: 1, black: 1 }
     function colorOf(v) { return COLOR_SET[v] ? v : 'yellow' }
+    const STYLE_SET = { highlight: 1, italic: 1, underline: 1 }
+    function styleOf(v) { return STYLE_SET[v] ? v : 'highlight' }
 
     /** 应用一处区间替换；行/列越界会被夹到有效范围。 */
     function applyPatch(p) {
@@ -1858,7 +1916,7 @@ return {
       S.touched = true
       return { changed: true, removed: hi - lo, inserted: ins.length }
     }
-    /** 落盘（笔记 + 划线状态），返回是否成功。 */
+    /** 落盘（笔记 + 标记状态），返回是否成功。 */
     async function flushAfterWrite() {
       if (!canWrite()) return true
       try { await writeAt(paths().note, S.text); S.fileExists = true; S.savedAt = isoNow() }
@@ -1885,14 +1943,15 @@ return {
     const SEL_HIT = { type: 'object', additionalProperties: false, properties: { id: { type: 'string', required: true }, color: { type: 'string', required: true }, range: { type: 'string', required: true }, text: { type: 'string', required: true } } }
     registerToolLocked(harness.defineTool({
       name: 'note_add_selection',
-      description: '由 agent 新建一个标记（高亮）。用于标注你要用户注意、或后续要跟进的区间。remark 可写这段的备注（会随选中对象一起给到 llm，也是用户点[选中]长按能填的那个字段）。color: yellow(默认) / pink / green / black(黑色是遮盖，字会被挡住)。',
+      description: '由 agent 新建一个标记。用于标注你要用户注意、或后续要跟进的区间。remark 可写这段的备注（会随选中对象一起给到 llm，也是用户长按标记能填的那个字段）。color: yellow(默认) / pink / green / black(黑色是遮盖，字会被挡住)；style: highlight(默认，荧光底色) / italic(斜体) / underline(下划线)，后两者直接改文字本身，同一段文字可以既有底色标记又有斜体标记。',
       parameters: {
         startLine: { type: 'integer', required: true, description: '起始行（1 基）' },
         startCol: { type: 'integer', required: true, description: '起始列（0 基）' },
         endLine: { type: 'integer', required: true, description: '结束行（1 基，含）' },
         endCol: { type: 'integer', required: true, description: '结束列（0 基，不含）' },
         color: { type: 'string', description: 'yellow / pink / green / black，默认 yellow。' },
-        remark: { type: 'string', description: '这条划线的备注（可空）。用户自己写的备注也在这个字段里。' },
+        style: { type: 'string', description: 'highlight（默认，荧光底色）/ italic（斜体）/ underline（下划线）。' },
+        remark: { type: 'string', description: '这条标记的备注（可空）。用户自己写的备注也在这个字段里。' },
       },
       output: {
         schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, revision: { type: 'integer', required: true }, reason: { type: 'string', required: true }, selections: { type: 'string', required: true } } },
@@ -1901,14 +1960,14 @@ return {
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_add_selection', exec); markTouched()
-        const r = await addSelection(Object.assign({}, args || {}, { color: colorOf((args || {}).color) }))
+        const r = await addSelection(Object.assign({}, args || {}, { color: colorOf((args || {}).color), style: styleOf((args || {}).style) }))
         return { ok: r.ok === true, id: r.ok ? r.id : '', revision: S.revision, reason: r.ok ? '' : String(r.reason || ''), selections: selRender(viewSelections()) }
         })
       },
     }))
     registerToolLocked(harness.defineTool({
       name: 'note_remove_selection',
-      description: '删除一条划线（按 id，id 来自 note_get_selections）。',
+      description: '删除一条标记（按 id，id 来自 note_get_selections）。',
       parameters: { id: { type: 'string', required: true, description: '标记 id，如 sel-9' } },
       output: {
         schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, removed: { type: 'boolean', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true } } },
@@ -1928,11 +1987,11 @@ return {
     }))
     registerToolLocked(harness.defineTool({
       name: 'note_clear_selections',
-      description: '清空全部划线。',
+      description: '清空全部标记。',
       parameters: {},
       output: {
         schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, cleared: { type: 'integer', required: true }, revision: { type: 'integer', required: true } } },
-        render: function (a, v) { return [{ type: 'text', text: '已清空 ' + v.cleared + ' 条划线' }] },
+        render: function (a, v) { return [{ type: 'text', text: '已清空 ' + v.cleared + ' 条标记' }] },
       },
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
@@ -1961,6 +2020,24 @@ return {
         for (let i = 0; i < S.selections.length; i++) if (S.selections[i].id === String(a.id || '')) { if (S.selections[i].color !== c) { S.selections[i].color = c; found = true } }
         if (found) { S.revision += 1; if (canWrite()) { try { await persistState() } catch (err) { fail('写入选中记录', err) } } }
         return { ok: true, found: found, color: c, revision: S.revision, selections: selRender(viewSelections()) }
+        })
+      },
+    }))
+    registerToolLocked(harness.defineTool({
+      name: 'note_set_style',
+      description: '改变一个标记的绘制方式：highlight(荧光底色，默认) / italic(斜体) / underline(下划线)。斜体和下划线直接作用在文字本身，适合"这句要背下来""这里是我错了"这类不需要抢注意力的标注；同一段文字可以同时有一条底色标记和一条斜体标记。',
+      parameters: { id: { type: 'string', required: true, description: '标记 id' }, style: { type: 'string', required: true, description: 'highlight / italic / underline' } },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, found: { type: 'boolean', required: true }, style: { type: 'string', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.found ? ('已把 ' + a.id + ' 改为 ' + v.style) : ('未找到 ' + a.id)) : '失败') + ' (rev ' + v.revision + ')\n\n' + v.selections }] },
+      },
+      async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
+        await enterFromTool('note_set_style', exec); markTouched()
+        const a = args || {}
+        const want = styleOf(a.style)
+        const r = await setMarkLook(a.id, '', want)
+        return { ok: r.ok === true, found: r.found === true, style: want, revision: S.revision, selections: selRender(viewSelections()) }
         })
       },
     }))
@@ -2025,7 +2102,7 @@ return {
       parameters: { action: { type: 'string', required: true, description: 'start = 唤起卡片；stop = 收起卡片' } },
       output: {
         schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, action: { type: 'string', required: true }, summoned: { type: 'boolean', required: true }, notes: { type: 'integer', required: true }, active: { type: 'string', required: true }, error: { type: 'string', required: true } } },
-        render: function (a, v) { return [{ type: 'text', text: v.ok ? (v.summoned ? ('笔记卡片已出现（本会话 ' + v.notes + ' 份笔记' + (v.active ? '，当前《' + v.active + '》' : '') + '）') : '笔记卡片已收起（笔记与划线都没有动）') : ('失败: ' + v.error) }] },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? (v.summoned ? ('笔记卡片已出现（本会话 ' + v.notes + ' 份笔记' + (v.active ? '，当前《' + v.active + '》' : '') + '）') : '笔记卡片已收起（笔记与标记都没有动）') : ('失败: ' + v.error) }] },
       },
       async execute(args, exec) {
         await enterFromTool('note_panel', exec, { allowEmpty: true })
@@ -2057,7 +2134,7 @@ return {
     }))
     registerToolLocked(harness.defineTool({
       name: 'note_patch',
-      description: '按区间精确改写笔记的一小段，无需输出全文——这是首选的写入方式（省上下文）。行 1 基、列 0 基、列以该行原文为准，列到行尾可用 endLine 下一行:0。写入后会自动重新锚定已有划线。',
+      description: '按区间精确改写笔记的一小段，无需输出全文——这是首选的写入方式（省上下文）。行 1 基、列 0 基、列以该行原文为准，列到行尾可用 endLine 下一行:0。写入后会自动重新锚定已有标记。',
       parameters: { startLine: RANGE_PARAMS.startLine, startCol: RANGE_PARAMS.startCol, endLine: RANGE_PARAMS.endLine, endCol: RANGE_PARAMS.endCol, text: { type: 'string', description: '替换文本；空串表示删除该区间。' } },
       output: { schema: PATCH_SCHEMA, render: patchRender },
       async execute(args, exec) {

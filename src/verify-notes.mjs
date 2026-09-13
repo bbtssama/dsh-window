@@ -439,6 +439,7 @@ sessions._m.set(SID_D, sessionWith(SID_D, WS))
   await t('note_find', { query: '三行' })
   const added = await t('note_add_selection', { startLine: 1, startCol: 0, endLine: 1, endCol: 6, color: 'pink' })
   await t('note_set_remark', { id: added && added.id, remark: '工具写的备注' })
+  await t('note_set_style', { id: added && added.id, style: 'italic' })
   const goto = await t('note_goto', { line: 3 })
   ok('note_goto moves the card and is reported back', goto.ok === true && goto.line === 3 && typeof goto.anchor === 'string', JSON.stringify({ ok: goto.ok, line: goto.line }))
   const panel = await t('note_panel', { action: 'start' })
@@ -468,7 +469,7 @@ const neverCalled = [...tools.keys()].filter((n) => !exercised.has(n))
 ok('every registered tool was exercised on a success path',
   neverCalled.length === 0,
   neverCalled.length ? 'never called: ' + neverCalled.join(',') : exercised.size + ' tools exercised')
-ok('the tool count still matches what the client and the docs expect', tools.size === 25, String(tools.size))
+ok('the tool count still matches what the client and the docs expect', tools.size === 26, String(tools.size))
 
 console.log('every RPC handler answers')
 // One handler, clearSelections, was declared without its `args` parameter while its body used
@@ -614,6 +615,64 @@ sessions._m.set(SID_H, sessionWith(SID_H, WS))
   ok('a remark is bounded in length',
     typeof longSel.remark === 'string' && longSel.remark.length === 1000,
     String(longSel.remark && longSel.remark.length))
+}
+
+console.log('mark styles (italic / underline next to the highlighter)')
+// A mark may draw itself in the text instead of behind it. The style rides on the same record as
+// the colour, so both travel through the same RPCs, the same state file and the same tool output.
+{
+  const SID_I = 'session-style-8888'
+  sessions._m.set(SID_I, sessionWith(SID_I, WS))
+  const r = async (m, a) => (await rpc(m, Object.assign({ sessionId: SID_I }, a || {}))).result || {}
+  await r('createNote', { name: '样式', text: '# 样式\n第一行内容\n第二行内容\n第三行内容\n' })
+  const hl = await r('addSelection', { startLine: 2, startCol: 0, endLine: 2, endCol: 5 })
+  const it = await r('addSelection', { startLine: 2, startCol: 0, endLine: 2, endCol: 5, style: 'italic' })
+  const ul = await r('addSelection', { startLine: 3, startCol: 0, endLine: 3, endCol: 5, style: 'underline', color: 'pink' })
+  const sels = (await r('state', { revision: -1 })).selections || []
+  const byId = (id) => sels.find((s) => s.id === id) || {}
+  ok('a mark created without a style is a highlighter',
+    byId(hl.id).style === 'highlight', JSON.stringify({ style: byId(hl.id).style }))
+  ok('italic and underline are stored on the mark',
+    byId(it.id).style === 'italic' && byId(ul.id).style === 'underline',
+    JSON.stringify({ italic: byId(it.id).style, underline: byId(ul.id).style }))
+  ok('two marks of different styles can cover the same words',
+    byId(hl.id).startLine === byId(it.id).startLine && byId(hl.id).startCol === byId(it.id).startCol && hl.id !== it.id,
+    hl.id + ' + ' + it.id + ' over the same range')
+  const stateFile = String(files.get(k(noteDirOf(SID_I, '样式') + '/.note-state.json')) || '')
+  ok('the style is persisted to disk', /"style":\s*"italic"/.test(stateFile) && /"style":\s*"underline"/.test(stateFile), stateFile.length + ' bytes')
+  const changed = await r('setMarkLook', { id: it.id, style: 'underline' })
+  const coloured = await r('setMarkLook', { id: ul.id, color: 'black' })
+  const after = (await r('state', { revision: -1 })).selections || []
+  const afterById = (id) => after.find((s) => s.id === id) || {}
+  ok('setMarkLook changes the style', changed.ok === true && afterById(it.id).style === 'underline',
+    JSON.stringify({ ok: changed.ok, style: afterById(it.id).style }))
+  ok('setMarkLook changes the colour', coloured.ok === true && afterById(ul.id).color === 'black' && afterById(ul.id).style === 'underline',
+    JSON.stringify({ color: afterById(ul.id).color, style: afterById(ul.id).style }))
+  ok('a colour change from the function card keeps the style, and vice versa',
+    afterById(hl.id).style === 'highlight' && (await r('setMarkLook', { id: hl.id, color: 'green' })).ok === true && ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === hl.id).style === 'highlight',
+    'rule holds both ways')
+  const badStyle = await r('setMarkLook', { id: hl.id, style: 'sparkle' })
+  const badColor = await r('setMarkLook', { id: hl.id, color: 'chartreuse' })
+  const none = await r('setMarkLook', { id: hl.id })
+  ok('an invalid style or colour is refused, not silently coerced',
+    badStyle.ok === false && badColor.ok === false && none.ok === false,
+    JSON.stringify({ style: badStyle.error, color: badColor.error, neither: none.error }))
+  const ghost = await r('setMarkLook', { id: 'sel-nope', style: 'italic' })
+  ok('a style change for a mark that does not exist is refused',
+    ghost.ok === false && /没有这条标记记录/.test(String(ghost.error)), JSON.stringify({ error: ghost.error }))
+  const all = await r('allMarks', {})
+  const group = (all.notes || []).find((g) => g.note === '样式') || {}
+  const anyStyle = (group.marks || []).some((m) => m.style === 'underline')
+  ok('the session view carries the style too', anyStyle === true, JSON.stringify((group.marks || []).map((m) => m.id + ':' + m.style)))
+  const styled = await asTool('note_set_style', { id: hl.id, style: 'italic' }, SID_I)
+  ok('note_set_style is a first-class tool', styled.style === 'italic' && styled.ok === true, JSON.stringify({ ok: styled.ok, style: styled.style }))
+  const addedStyled = await asTool('note_add_selection', { startLine: 4, startCol: 0, endLine: 4, endCol: 5, style: 'underline' }, SID_I)
+  const madeStyle = ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === addedStyled.id) || {}
+  ok('note_add_selection can create a styled mark directly', madeStyle.style === 'underline', JSON.stringify({ style: madeStyle.style }))
+  const tool = tools.get('note_get_selections')
+  const rendered = tool.output.render({}, await asTool('note_get_selections', {}, SID_I)).map((p) => p.text).join('\n')
+  ok('the model is told which mark is italic and which is underlined',
+    rendered.indexOf('·斜体') >= 0 && rendered.indexOf('·下划线') >= 0, rendered.split('\n').slice(0, 3).join(' | '))
 }
 
 console.log(failed === 0 ? '\nALL NOTE-MODEL CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')

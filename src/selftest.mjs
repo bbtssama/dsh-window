@@ -216,7 +216,7 @@ const leaked = retiredNames.filter((n) => new RegExp('\\b' + n + '\\b').test(hos
 ok('no retired identifier survives in shipped code', leaked.length === 0, leaked.join(','))
 
 ok('every note tool resolves its workspace explicitly and loudly',
-  (hostSource.match(/await enterFromTool\('note_/g) || []).length === 25,
+  (hostSource.match(/await enterFromTool\('note_/g) || []).length === 26,
   String((hostSource.match(/await enterFromTool\('note_/g) || []).length) + ' guarded tool entry points')
 
 // The panel and the host must agree on method names, and every note-space call must
@@ -357,6 +357,61 @@ if (ReactDOMServer === null) {
     // No state yet on a cold start, so the card renders nothing until the first
     // /state reply lands — an empty string here is the correct initial output.
     ok('cold render produces no markup (waiting for state)', renderError === null && typeof html === 'string', html === null ? 'n/a' : JSON.stringify(html.slice(0, 60)))
+  }
+}
+
+console.log('')
+console.log('client render: marks that live in the text')
+// The italic/underline renderer is pure arithmetic over a mark list plus a rendered text span,
+// so it is testable without a browser. This is the part that decides WHICH characters carry
+// WHICH style, and getting it wrong paints the wrong words.
+{
+  const src = fs.readFileSync(path.join(lib, 'client.js'), 'utf8')
+  const extract = (name) => {
+    const at = src.indexOf('function ' + name + '(')
+    if (at < 0) return ''
+    let depth = 0
+    for (let k = src.indexOf('{', at); k < src.length; k++) {
+      const c = src[k]
+      if (c === '{') depth++
+      else if (c === '}') { depth--; if (depth === 0) return src.slice(at, k + 1) }
+    }
+    return ''
+  }
+  const fns = ['markStyle', 'textStyleRuns', 'textStyleSegments'].map(extract)
+  ok('the style renderer is present in the shipped client',
+    fns.every((f) => f.length > 40) && src.indexOf('data-mkid') > 0 && src.indexOf("'.dn-mki{font-style:italic;}'") > 0,
+    fns.map((f) => f.length).join('/') + ' chars extracted')
+  let api = null
+  try {
+    api = eval('(function(){' + fns.join('\n') + '\nreturn { markStyle: markStyle, textStyleRuns: textStyleRuns, textStyleSegments: textStyleSegments }})()')
+  } catch (err) { api = null }
+  ok('the style helpers evaluate standalone', api !== null, api === null ? 'eval failed' : 'ok')
+  if (api !== null) {
+    const { markStyle, textStyleRuns, textStyleSegments } = api
+    ok('a mark without a style is a highlighter', markStyle({}) === 'highlight' && markStyle({ style: 'junk' }) === 'highlight',
+      JSON.stringify([markStyle({}), markStyle({ style: 'junk' })]))
+    const sels = [
+      { id: 'a', style: 'italic', startLine: 2, startCol: 3, endLine: 2, endCol: 8 },
+      { id: 'b', style: 'underline', startLine: 2, startCol: 6, endLine: 4, endCol: 2 },
+      { id: 'c', style: 'highlight', startLine: 2, startCol: 0, endLine: 2, endCol: 40 },
+    ]
+    const runs = textStyleRuns(sels)
+    ok('only the text styles become runs, and they are keyed by line',
+      Object.keys(runs.byLine).join(',') === '2,3,4' && runs.byLine[2].length === 2 && runs.byLine[3].length === 1,
+      JSON.stringify({ lines: Object.keys(runs.byLine), per: runs.byLine[2].length }))
+    const seg = textStyleSegments(runs.byLine[2], 0, 12)
+    ok('a covered span is split at the run boundaries',
+      seg !== null && seg.map((s) => s.off + '+' + s.len + ':' + s.styles.join('&')).join(' ') === '0+3: 3+3:italic 6+2:italic&underline 8+4:underline',
+      seg === null ? 'null' : seg.map((s) => s.off + '+' + s.len + ':' + s.styles.join('&')).join(' '))
+    ok('overlapping marks of different styles stack on the same characters',
+      textStyleSegments(runs.byLine[2], 6, 2).every((s) => s.styles.length === 2 && s.ids.length === 2),
+      JSON.stringify(textStyleSegments(runs.byLine[2], 6, 2)))
+    ok('a line in the middle of a multi-line mark is fully covered',
+      textStyleSegments(runs.byLine[3], 0, 50).every((s) => s.styles.indexOf('underline') >= 0),
+      JSON.stringify(textStyleSegments(runs.byLine[3], 0, 1)))
+    ok('a span outside every run is left alone', textStyleSegments(runs.byLine[4], 5, 20) === null, 'null')
+    ok('an empty span is never styled', textStyleSegments(runs.byLine[2], 3, 0) === null, 'null')
   }
 }
 
