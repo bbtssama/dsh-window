@@ -1216,7 +1216,15 @@ return {
       },
       async execute(args, exec) {
         await enterFromTool('note_create', exec, { allowEmpty: true })
-        return await withNoteLock(noteLockKey(), async function () { return await createNote(args || {}) })
+        return await withNoteLock(noteLockKey(), async function () {
+          const r = await createNote(args || {})
+          // Every property of this output is required, `error` included, and the harness
+          // validates the output of a SUCCESSFUL call too: returning createNote()'s raw
+          // success shape (which has no `error`) made the whole call fail with "missing
+          // required property value.error" — the note WAS created, but the model was told
+          // it had failed. Normalize both paths instead of relaxing the schema.
+          return Object.assign({ ok: false, name: String((args && args.name) || ''), active: activeNote, source: '', lineCount: 0, dir: '', error: '' }, r)
+        })
       },
     }))
     registerToolLocked(harness.defineTool({
@@ -1245,7 +1253,12 @@ return {
       },
       async execute(args, exec) {
         await enterFromTool('note_clear', exec)
-        return await withNoteLock(noteLockKey(), function () { return clearNote(args || {}) })
+        return await withNoteLock(noteLockKey(), async function () {
+          const r = await clearNote(args || {})
+          // Same reason as note_create: the schema requires `error` on both paths, so a
+          // successful clear has to carry it (see the comment there).
+          return Object.assign({ ok: false, name: activeNote, clearedLines: 0, keptHistory: true, error: '' }, r)
+        })
       },
     }))
     registerToolLocked(harness.defineTool({

@@ -23,6 +23,8 @@ const lib = path.join('D:\\DSH\\profiles\\web\\node_modules\\dsh-window\\lib')
 const host = await import(new URL('file:///' + path.join(lib, 'index.js').replace(/\\/g, '/')).href)
 
 let failed = 0
+/** Tool names that reached the schema-checking wrapper at least once. */
+const exercised = new Set()
 const ok = (label, cond, detail) => {
   if (cond) console.log('  PASS  ' + label)
   else { failed++; console.log('  FAIL  ' + label + (detail === undefined ? '' : '  -> ' + detail)) }
@@ -139,12 +141,22 @@ const shell = {
 const sessions = { _m: new Map(), get(id) { return this._m.get(id) || null } }
 
 // ── output-schema conformance, exactly as the harness enforces it ────────────────
+// defineTool COMPILES the authored schema: a per-property `required: true` is moved into a
+// top-level `required: [...]` array (dsh-tools: "task.required.push(task.key"), and the
+// runtime enforces that array ("missing required property ..."). Reading only the
+// per-property flag made this checker blind to missing properties — it saw every property
+// as optional, so note_create/note_clear shipped returning no `error` on success and the
+// live harness rejected them. Honour BOTH forms.
 function checkSchema(schema, value, path, errs) {
   if (!schema) return
   if (schema.type === 'object') {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) { errs.push(path + ' is not an object'); return }
     const props = schema.properties || {}
-    for (const k of Object.keys(props)) if (props[k].required && !(k in value)) errs.push(path + '.' + k + ' is missing')
+    const reqArr = Array.isArray(schema.required) ? schema.required : []
+    for (const k of Object.keys(props)) {
+      const required = props[k].required === true || reqArr.indexOf(k) >= 0
+      if (required && !(k in value)) errs.push(path + '.' + k + ' is missing')
+    }
     if (schema.additionalProperties === false) for (const k of Object.keys(value)) if (!(k in props)) errs.push(path + '.' + k + ' is not a declared property')
     for (const k of Object.keys(value)) if (props[k]) checkSchema(props[k], value[k], path + '.' + k, errs)
     return
@@ -163,6 +175,7 @@ function wrapSchemaChecked(t) {
   const inner = t.execute
   t.execute = async function (args, exec) {
     const value = await inner.call(t, args, exec)
+    exercised.add(t.name)
     const errs = []
     checkSchema(t.output && t.output.schema, value, t.name, errs)
     if (errs.length) {
@@ -348,6 +361,46 @@ ok('note rows report their selection counts', rows.notes.every((n) => typeof n.s
 let missingErr = ''
 try { await tools.get('note_read').execute({ note: '不存在' }, { agent: { session: sessionWith(SID_A, WS) } }) } catch (e) { missingErr = String(e.message || e) }
 ok('a missing note name fails loudly', /没有名为/.test(missingErr), missingErr.slice(0, 70))
+
+console.log('every tool answers with a schema-valid success value')
+// The wrapper above only validates the tools this file actually calls, and most of them were
+// never called on a SUCCESS path — which is exactly how note_create and note_clear shipped
+// returning no `error` on success while their output schema required it: the live harness
+// rejected those calls ("missing required property value.error") even though the note had
+// been created. Call every registered tool once, on the path that succeeds.
+const SID_D = 'session-tools-5555'
+sessions._m.set(SID_D, sessionWith(SID_D, WS))
+{
+  const t = (name, args) => asTool(name, args || {}, SID_D)
+  await t('note_create', { name: '全量工具' })
+  await t('note_write', { content: '# 全量工具\n第二行有内容\n第三行有内容\n' })
+  await t('note_patch', { startLine: 2, startCol: 0, endLine: 2, endCol: 3, text: '第二行' })
+  await t('note_patch_many', { edits: [{ startLine: 3, startCol: 0, endLine: 3, endCol: 3, text: '第三行' }] })
+  await t('note_find', { query: '三行' })
+  const added = await t('note_add_selection', { startLine: 1, startCol: 0, endLine: 1, endCol: 6, color: 'pink' })
+  await t('note_get_selections')
+  await t('note_take_new_selections')
+  await t('note_set_color', { id: added && added.id, color: 'green' })
+  await t('note_remove_selection', { id: added && added.id })
+  await t('note_add_selection', { startLine: 1, startCol: 0, endLine: 1, endCol: 6, color: 'yellow' })
+  await t('note_clear_selections')
+  await t('note_commit', { message: 'tool check' })
+  await t('note_checkpoint', { message: 'tool check' })
+  await t('note_diag')
+  await t('note_export', { to: WS + '/exported-toolcheck.md' })
+  await t('note_read')
+  await t('note_list')
+  await t('note_open', { name: '全量工具' })
+  await t('note_import', { text: '导入\n', mode: 'append' })
+  await t('note_rename', { from: '全量工具', to: '全量工具2' })
+  await t('note_clear', { title: '全量工具2' })
+  await t('note_delete', { name: '全量工具2', confirm: true })
+}
+const neverCalled = [...tools.keys()].filter((n) => !exercised.has(n))
+ok('every registered tool was exercised on a success path',
+  neverCalled.length === 0,
+  neverCalled.length ? 'never called: ' + neverCalled.join(',') : exercised.size + ' tools exercised')
+ok('the tool count still matches what the client and the docs expect', tools.size === 22, String(tools.size))
 
 console.log(failed === 0 ? '\nALL NOTE-MODEL CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')
 process.exit(failed === 0 ? 0 : 1)
