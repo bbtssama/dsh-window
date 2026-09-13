@@ -14,7 +14,7 @@ const CSS = [
 // layer next to the body cost 0.3ms — a 350x difference, and the reason dragging felt
 // broken on big notes. The layers are clipped to the body's box and translated by the scroll
 // offset, so overlay coordinates stay in content coordinates (see the render).
-'.dn-wrap{position:relative;display:flex;flex:1 1 auto;min-height:0;min-width:0;}',
+'.dn-wrap{position:relative;display:flex;flex:1 1 auto;min-height:72px;min-width:0;}',
 '.dn-lay{position:absolute;left:0;top:0;right:0;bottom:0;overflow:hidden;pointer-events:none;}',
 '.dn-lay-back{z-index:-1;}',
 '.dn-lay-front{z-index:3;}',
@@ -161,14 +161,14 @@ const CSS = [
 // ── the mark list (标记列表) ─────────────────────────────────────────────────────
 // Two views: this note, and every note of the session. Rows show the passage rendered as
 // block Markdown, and clicking one jumps the reader there (switching notes when needed).
-'.dn-marks{display:flex;flex-direction:column;min-height:0;max-height:58%;flex:0 0 auto;border-top:1px solid rgba(0,0,0,.1);}',
-'.dn-marks-head{display:flex;align-items:center;gap:6px;padding:7px 10px;border-bottom:1px solid rgba(0,0,0,.06);}',
+'.dn-marks{display:flex;flex-direction:column;min-height:0;max-height:58%;flex:0 1 auto;border-top:1px solid rgba(0,0,0,.1);}',
+'.dn-marks-head{display:flex;align-items:center;gap:6px;padding:7px 10px;border-bottom:1px solid rgba(0,0,0,.06);flex:0 0 auto;}',
 '.dn-marks-title{font-size:12.5px;font-weight:600;}',
 '.dn-tabs{display:flex;gap:4px;margin-left:auto;}',
 '.dn-tab{border:1px solid rgba(0,0,0,.14);background:transparent;color:inherit;font-size:11.5px;padding:4px 9px;border-radius:999px;cursor:pointer;}',
 '.dn-tab-on{background:rgba(79,124,255,.12);border-color:rgba(79,124,255,.5);color:#2f5fd0;font-weight:600;}',
 '.dn-marks-refresh{border:0;background:transparent;color:#6b7280;font-size:11.5px;cursor:pointer;padding:4px 6px;}',
-'.dn-marks-body{overflow:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:8px 10px;min-height:0;}',
+'.dn-marks-body{overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;padding:8px 10px;min-height:0;flex:1 1 auto;}',
 '.dn-mark{border:1px solid rgba(0,0,0,.1);border-left-width:3px;border-radius:8px;padding:6px 8px;margin-bottom:7px;background:rgba(0,0,0,.015);}',
 '.dn-mark[data-color=yellow]{border-left-color:rgba(255,214,0,.95);}',
 '.dn-mark[data-color=pink]{border-left-color:rgba(255,138,190,.95);}',
@@ -245,6 +245,11 @@ const CSS = [
 '.dn-remark{left:6px;right:6px;bottom:6px;}',
 '.dn-remark textarea{min-height:84px;}',
 '.dn-remark-row button{padding:12px 16px;font-size:14px;}',
+// The phone layout has no definite card height for a percentage to resolve against, so the
+// mark list's cap uses vh here — otherwise it grew past the card and its body never became
+// scrollable ("这个列表不能往下滑").
+'.dn-marks{max-height:48vh;}',
+'.dn-wrap{min-height:56px;}',
 '.dn-sel-item .dn-x{padding:9px 10px;font-size:13px;}}',
 ].join("\n")
 const LAYOUT_KEY = 'dsh-note-card:layout:v1'
