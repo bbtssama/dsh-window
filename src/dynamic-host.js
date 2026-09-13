@@ -692,7 +692,14 @@ return {
       if (canWrite()) await ensureGit()
     }
     function ensureLoaded() {
-      if (loading !== null) return loading
+      // A load must not stick when it ran against a DIFFERENT workspace root. At startup the
+      // session's workspace can resolve a moment after the first request; a load that ran
+      // against the fallback base saw an empty note space, cached itself in `loading`, and the
+      // store then believed this session had no note at all — the card showed a blank note
+      // until the user manually switched notes ("dsh web 启动后，需要切换笔记才显示笔记").
+      // Reload whenever the base the store was loaded for no longer matches the live one.
+      if (loading !== null && base && loadedBase === base) return loading
+      if (loading !== null) loading = null
       loading = (async function () {
         if (!sessionId) { S.error = '本会话没有可用的会话 id'; return }
         await readSessionState()
@@ -910,7 +917,7 @@ return {
       return { ok: true, hash: S.commitHash, message: msg }
     }
     function selRender(list) {
-      if (!list || list.length === 0) return '（当前没有任何选中内容）'
+      if (!list || list.length === 0) return '（当前没有任何标记）'
       const parts = []
       for (let i = 0; i < list.length; i++) {
         const s = list[i]
@@ -1155,7 +1162,7 @@ return {
     }
     registerToolLocked(harness.defineTool({
       name: 'note_get_selections',
-      description: '读取笔记卡片里用户划选过的全部内容(按正文先后排序的对象数组)。每项含 id、序号 order、起止行/列(1 基行号、0 基列号)、选中时间 createdAt、原文 text、是否已被取用过 fetched、原文是否已变动 stale。',
+      description: '读取笔记卡片里用户做过的全部标记(按正文先后排序的对象数组)。每项含 id、序号 order、起止行/列(1 基行号、0 基列号)、选中时间 createdAt、原文 text、是否已被取用过 fetched、原文是否已变动 stale。',
       parameters: { includeText: { type: 'boolean', description: '是否返回原文 text，默认 true。' }, note: { type: 'string', description: '要看哪一份笔记（默认当前打开的；指定别的名字不会切换卡片）' } },
       output: { schema: { type: 'array', items: SEL_ITEM }, render: function (a, v) { return [{ type: 'text', text: selRender(v) }] } },
       async execute(args, exec) {
@@ -1205,7 +1212,7 @@ return {
           const numbered = v.text.split('\n').map(function (l, i) { return ('    ' + String(i + v.fromLine)).slice(-5) + '| ' + l }).join('\n')
           const range = (v.fromLine === 1 && v.toLine === v.lineCount) ? '' : (' 第 ' + v.fromLine + '-' + v.toLine + ' 行')
           const where = v.viewLine ? ('\n用户当前读到: 第 ' + v.viewLine + ' 行') : ''
-          return [{ type: 'text', text: '笔记文件: ' + v.path + (range ? range : '') + ' (共 ' + v.lineCount + ' 行)' + where + '\n\n' + numbered + '\n\n--- 选中概览 ---\n' + v.selections }]
+          return [{ type: 'text', text: '笔记文件: ' + v.path + (range ? range : '') + ' (共 ' + v.lineCount + ' 行)' + where + '\n\n' + numbered + '\n\n--- 标记概览 ---\n' + v.selections }]
         },
       },
       async execute(args, exec) {
@@ -1594,6 +1601,39 @@ return {
         return { ok: true, revision: S.revision, selections: viewSelections() }
       })
     })
+    // Every mark of every note in this session, for the card's session view. Read-only: it
+    // touches no store, so it cannot disturb the note the user is looking at.
+    handleLocked('allMarks', async function (args) {
+      if (!bindSession(args && args.sessionId)) return notMine('allMarks')
+      confirmed = true
+      await ensureLoaded()
+      const names = await listNoteDirs()
+      const out = []
+      for (let i = 0; i < names.length; i++) {
+        const name = names[i]
+        const dir = sessionRoot() + '/' + name
+        let marks = []
+        let lines = 0
+        try {
+          const rawNote = await readIfExists(dir + '/' + NOTE_FILE)
+          if (rawNote !== null) lines = linesOf(rawNote).length
+        } catch (err) { }
+        try {
+          const rawState = await readIfExists(dir + '/' + STATE_FILE)
+          if (rawState !== null) {
+            const parsed = JSON.parse(rawState)
+            const list = parsed && Array.isArray(parsed.selections) ? parsed.selections : []
+            for (let k = 0; k < list.length; k++) {
+              const s = normalizeSel(list[k])
+              if (s !== null) marks.push(s)
+            }
+            marks = sortSelections(marks)
+          }
+        } catch (err) { }
+        out.push({ note: name, active: name === activeNote, lines: lines, marks: marks })
+      }
+      return { ok: true, notes: out, active: activeNote }
+    })
     // The remark the reader typed for a selection (the long press on [选中] opens the input).
     handleLocked('setRemark', async function (args) {
       if (!bindSession(args && args.sessionId)) return notMine('setRemark')
@@ -1845,7 +1885,7 @@ return {
     const SEL_HIT = { type: 'object', additionalProperties: false, properties: { id: { type: 'string', required: true }, color: { type: 'string', required: true }, range: { type: 'string', required: true }, text: { type: 'string', required: true } } }
     registerToolLocked(harness.defineTool({
       name: 'note_add_selection',
-      description: '由 agent 新建一条划线（高亮）。用于标注你要用户注意、或后续要跟进的区间。remark 可写这段的备注（会随选中对象一起给到 llm，也是用户点[选中]长按能填的那个字段）。color: yellow(默认) / pink / green / black(黑色是遮盖，字会被挡住)。',
+      description: '由 agent 新建一个标记（高亮）。用于标注你要用户注意、或后续要跟进的区间。remark 可写这段的备注（会随选中对象一起给到 llm，也是用户点[选中]长按能填的那个字段）。color: yellow(默认) / pink / green / black(黑色是遮盖，字会被挡住)。',
       parameters: {
         startLine: { type: 'integer', required: true, description: '起始行（1 基）' },
         startCol: { type: 'integer', required: true, description: '起始列（0 基）' },
@@ -1856,7 +1896,7 @@ return {
       },
       output: {
         schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, revision: { type: 'integer', required: true }, reason: { type: 'string', required: true }, selections: { type: 'string', required: true } } },
-        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已新建划线 ' + v.id + ' (rev ' + v.revision + ')\n\n' + v.selections) : ('未新建: ' + (v.reason === 'empty' ? '该区间为空' : v.reason)) }] },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已新建标记 ' + v.id + ' (rev ' + v.revision + ')\n\n' + v.selections) : ('未新建: ' + (v.reason === 'empty' ? '该区间为空' : v.reason)) }] },
       },
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
@@ -1869,7 +1909,7 @@ return {
     registerToolLocked(harness.defineTool({
       name: 'note_remove_selection',
       description: '删除一条划线（按 id，id 来自 note_get_selections）。',
-      parameters: { id: { type: 'string', required: true, description: '划线 id，如 sel-9' } },
+      parameters: { id: { type: 'string', required: true, description: '标记 id，如 sel-9' } },
       output: {
         schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, removed: { type: 'boolean', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true } } },
         render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.removed ? '已删除 ' + a.id : '未找到 ' + a.id) : '失败') + ' (rev ' + v.revision + ')\n\n' + v.selections }] },
@@ -1906,8 +1946,8 @@ return {
     }))
     registerToolLocked(harness.defineTool({
       name: 'note_set_color',
-      description: '修改一条划线的颜色：yellow / pink / green / black。可用它把已处理的划线转成绿色、或把要屏蔽的区间涂黑。',
-      parameters: { id: { type: 'string', required: true, description: '划线 id' }, color: { type: 'string', required: true, description: 'yellow / pink / green / black' } },
+      description: '修改一个标记的颜色：yellow / pink / green / black。可用它把已处理的标记转成绿色、或把要屏蔽的区间涂黑。',
+      parameters: { id: { type: 'string', required: true, description: '标记 id' }, color: { type: 'string', required: true, description: 'yellow / pink / green / black' } },
       output: {
         schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, found: { type: 'boolean', required: true }, color: { type: 'string', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true } } },
         render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.found ? ('已把 ' + a.id + ' 改为 ' + v.color) : ('未找到 ' + a.id)) : '失败') + ' (rev ' + v.revision + ')\n\n' + v.selections }] },
@@ -1926,9 +1966,9 @@ return {
     }))
     registerToolLocked(harness.defineTool({
       name: 'note_set_remark',
-      description: '给一条划线写/改备注（用户点[选中]时长按弹出的那个输入框写的就是这个字段）。备注会随选中对象一起提供给 llm。传空字符串即清除备注。',
+      description: '给一个标记写/改备注（用户在卡片里长按[标记]弹出的输入框写的就是这个字段）。备注会随标记一起提供给 llm。传空字符串即清除备注。',
       parameters: {
-        id: { type: 'string', required: true, description: '划线 id' },
+        id: { type: 'string', required: true, description: '标记 id' },
         remark: { type: 'string', required: true, description: '备注内容；空字符串表示清除。' },
       },
       output: {

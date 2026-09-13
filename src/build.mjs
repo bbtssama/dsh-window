@@ -69,7 +69,7 @@ hostBody = hostBody.replaceAll('harness.handle(', 'handle(')
 if (hostToolHits !== 25) throw new Error('host: expected 25 tool registrations, saw ' + hostToolHits)
 // 17 note tools + 8 note management tools + 17 rpc handlers (no new RPCs)
 // (state/saveText/addSelection/saveView/…/importNote)
-if (hostHandleHits !== 17) throw new Error('host: expected 17 rpc handlers, saw ' + hostHandleHits)
+if (hostHandleHits !== 18) throw new Error('host: expected 18 rpc handlers, saw ' + hostHandleHits)
 if (hostBody.includes('harness.')) throw new Error('host: a harness.* reference survived')
 
 // ── late-bound services ──
