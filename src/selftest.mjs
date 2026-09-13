@@ -36,6 +36,59 @@ const hostUrl = new URL('file:///' + path.join(lib, 'index.js').replace(/\\/g, '
 const hostModule = await import(hostUrl)
 ok('exports name/inject/apply', hostModule.name === 'dsh-window' && hostModule.apply instanceof Function && Array.isArray(hostModule.inject), Object.keys(hostModule).join(','))
 
+// ── the boot path a composition actually takes ───────────────────────────────
+// A profile row is applied with the `config:` its composition carries — not with
+// nothing. This block used to call apply(ctx) bare, so a config-only crash stayed
+// invisible here and only appeared when the real profile booted with
+// `noteDir: dsh-note` and took the entire plugin tree down with
+// "NOTE_DIR is not defined" (`dsh web` would not start at all).
+console.log('boot path')
+
+/** Pull the note-card row's `config:` mapping out of a composition patch. */
+function readNoteCardConfig(text) {
+  const lines = String(text).replace(/\r\n?/g, '\n').split('\n')
+  const at = lines.findIndex((l) => /^\s*config\s*:\s*$/.test(l))
+  if (at < 0) return {}
+  const indent = lines[at].match(/^\s*/)[0].length
+  const spec = {}
+  for (let i = at + 1; i < lines.length; i++) {
+    const line = lines[i]
+    if (line.trim() === '' || /^\s*#/.test(line)) continue
+    if (line.match(/^\s*/)[0].length <= indent) break
+    const m = /^\s*([A-Za-z_$][\w$]*)\s*:\s*(.+?)\s*$/.exec(line)
+    if (m) spec[m[1]] = m[2].replace(/^['"]|['"]$/g, '')
+  }
+  return spec
+}
+
+/** The smallest ctx that lets apply() run its whole prologue to completion. */
+function bootCtx() {
+  return {
+    // `inject = ['tools']` means cordis hands this in before apply runs.
+    tools: { register: () => () => { } },
+    get: () => undefined,
+    on: () => () => { },
+    effect: (fn) => { try { return fn() } catch (err) { return undefined } },
+  }
+}
+
+const patchPath = path.join(path.resolve(lib, '..'), 'cordis.patch.yml')
+ok('the shipped composition patch sits next to the bundle', fs.existsSync(patchPath), patchPath)
+const compositionConfig = fs.existsSync(patchPath) ? readNoteCardConfig(fs.readFileSync(patchPath, 'utf8')) : {}
+console.log('  config: ' + JSON.stringify(compositionConfig))
+
+for (const [label, config] of [
+  ['the shipped composition config', compositionConfig],
+  ['no config at all', undefined],
+  // An already-installed older patch file may still carry the retired names; the
+  // plugin must shrug them off rather than die while the tree is loading.
+  ['a retired legacy config', { noteDir: 'dsh-note', noteFile: 'note.md' }],
+]) {
+  let failure = null
+  try { hostModule.apply(bootCtx(), config) } catch (err) { failure = err && err.message ? err.message : String(err) }
+  ok('apply() boots through ' + label, failure === null, failure)
+}
+
 const registeredTools = []
 const registeredRoutes = []
 const registeredSections = []
@@ -155,6 +208,13 @@ const hostCode = hostSource.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test
 ok('no implicit session adoption remains',
   !/\bownFromAgents\b/.test(hostCode) && !/\bcurrentInitiator\b/.test(hostCode) && !/\bcandidateFromLiveAgents\b/.test(hostCode),
   'ownFromAgents/currentInitiator/candidateFromLiveAgents absent from the host code')
+// A retired identifier must not survive in executable code: the crash this guards
+// against ("NOTE_DIR is not defined") came from build.mjs still emitting an assignment
+// to a name the storage model had dropped. Comments may mention it; code may not.
+const retiredNames = ['NOTE_DIR', 'noteDir', 'adoptFromExec', 'ownFromAgents', 'foreignCaller', 'ownerIsLive']
+const leaked = retiredNames.filter((n) => new RegExp('\\b' + n + '\\b').test(hostCode))
+ok('no retired identifier survives in shipped code', leaked.length === 0, leaked.join(','))
+
 ok('every note tool resolves its workspace explicitly and loudly',
   (hostSource.match(/await enterFromTool\('note_/g) || []).length === 22,
   String((hostSource.match(/await enterFromTool\('note_/g) || []).length) + ' guarded tool entry points')

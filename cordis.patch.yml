@@ -14,7 +14,7 @@
       # `name`. Quoted because `@` is a reserved indicator in YAML and cannot
       # open a plain scalar.
       name: 'dsh-window'
-      config:
-        # 笔记目录与文件名，相对会话工作区。默认即历史上的 dsh-note/note.md。
-        noteDir: dsh-note
-        noteFile: note.md
+      # 没有 `config:`：笔记空间是按会话固定的
+      # <工作区>/dsh-window/note/<会话id>/<笔记名>/note.md，没有可配置项。
+      # 旧的 noteDir/noteFile 只服务于已删除的 dsh-note/ 兼容层；即使某个已安装
+      # 副本还带着它，插件也会忽略。
