@@ -162,6 +162,17 @@ const CSS = [
 '.dn-sel-item{border:1px solid rgba(0,0,0,.1);border-radius:7px;padding:5px 7px;margin-bottom:6px;background:rgba(255,214,0,.1);}',
 '.dn-sel-meta{font-size:10.5px;color:var(--dsw-alias-label-tertiary,#8a8f98);display:flex;gap:6px;align-items:center;}',
 '.dn-sel-text{white-space:pre-wrap;word-break:break-word;max-height:52px;overflow:hidden;}',
+// The remark input. 16px keeps iOS from zooming the page when it takes focus, which on a
+// phone otherwise leaves the card scaled and the caret off-screen.
+'.dn-remark{position:absolute;left:8px;right:8px;bottom:8px;z-index:9;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid rgba(0,0,0,.18);border-radius:10px;padding:9px;box-shadow:0 8px 24px rgba(0,0,0,.22);}',
+'.dn-remark-title{font-size:12px;color:var(--dsw-alias-label-secondary,#6b7280);margin-bottom:6px;}',
+'.dn-remark textarea{width:100%;box-sizing:border-box;min-height:62px;max-height:180px;font-family:inherit;font-size:16px;line-height:1.5;border:1px solid rgba(0,0,0,.16);border-radius:8px;padding:7px 9px;resize:vertical;background:transparent;color:inherit;outline:none;}',
+'.dn-remark textarea:focus{border-color:var(--dsw-alias-label-primary,#1b1b1b);}',
+'.dn-remark-row{display:flex;gap:6px;justify-content:flex-end;align-items:center;margin-top:7px;}',
+'.dn-remark-row button{border:1px solid rgba(0,0,0,.16);background:transparent;color:inherit;font-size:12.5px;padding:5px 12px;border-radius:7px;cursor:pointer;}',
+'.dn-remark-row button[data-act=save]{background:#4f7cff;border-color:#4f7cff;color:#fff;font-weight:600;}',
+'.dn-remark-hint{margin-right:auto;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);}',
+'.dn-sel-remark{white-space:pre-wrap;word-break:break-word;margin-top:4px;padding:3px 6px;border-left:3px solid #4f7cff;background:rgba(79,124,255,.08);border-radius:0 5px 5px 0;}',
 '.dn-x{margin-left:auto;border:0;background:transparent;color:#d33;cursor:pointer;font-size:12px;padding:4px 6px;}',
 '.dn-pill{position:fixed;right:16px;bottom:20px;pointer-events:auto;z-index:60;height:34px;border:1px solid rgba(0,0,0,.16);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1,#fff) 92%,transparent);backdrop-filter:blur(16px);box-shadow:0 8px 28px rgba(0,0,0,.16);color:var(--dsw-alias-label-secondary,#555);font:inherit;font-size:12px;font-weight:600;line-height:20px;cursor:pointer;border-radius:999px;display:inline-flex;align-items:center;gap:7px;padding:0 12px;}',
 '.dn-pill:hover{transform:translateY(-1px);}',
@@ -756,6 +767,14 @@ return {
       // browser logs that as a console error), so the browser-local mirror carries the
       // feature alone until a state answer actually carries a `view` field.
       const hostViewRef = React.useRef(false)
+      // The remark input: { id } when editing an existing selection's remark, { live: true }
+      // when it belongs to the selection being made (the long press on [选中]).
+      const [remarkFor, setRemarkFor] = React.useState(null)
+      const [remarkDraft, setRemarkDraft] = React.useState('')
+      const remarkTimerRef = React.useRef(null)
+      const remarkInputRef = React.useRef(null)
+      // How long [选中] must be held before the remark input opens instead of committing.
+      const REMARK_HOLD_MS = 450
       const noteNameRef = React.useRef('')
       sidRef.current = shownSessionId || ''
       noteNameRef.current = noteName || ''
@@ -822,6 +841,17 @@ return {
       // The reading position is written 700ms after scrolling stops, so closing the card or
       // the tab right after a scroll must flush what is pending (best effort — an async RPC
       // during pagehide may not complete, but the debounce already covers most of it).
+      // Focus the remark input as soon as it opens (on a phone that is what raises the
+      // keyboard, so the reader can type immediately after the long press).
+      React.useEffect(function () {
+        if (!remarkFor) return undefined
+        const el = remarkInputRef.current
+        if (!el) return undefined
+        const grab = function () { try { el.focus() } catch (err) { } }
+        grab()
+        const ids = [60, 260].map(function (ms) { return window.setTimeout(grab, ms) })
+        return function () { for (let i = 0; i < ids.length; i++) { try { window.clearTimeout(ids[i]) } catch (err) { } } }
+      }, [remarkFor])
       React.useEffect(function () {
         const onHide = function () { if (document.visibilityState === 'hidden') saveViewNow() }
         document.addEventListener('visibilitychange', onHide)
@@ -1264,7 +1294,7 @@ return {
         parts.push((ls[last.line - 1] || '').slice(0, last.col))
         return parts.join('\n')
       }
-      function commitLive() {
+      function commitLive(remark) {
         if (!live) return
         const first = cmpPos(live.a, live.f) <= 0 ? live.a : live.f
         const last = cmpPos(live.a, live.f) <= 0 ? live.f : live.a
@@ -1281,14 +1311,44 @@ return {
         const rangeArgs = blkRange
           ? { startLine: blkRange.from, startCol: 0, endLine: blkRange.to, endCol: (blkLines[blkRange.to - 1] || '').length }
           : { startLine: first.line, startCol: first.col, endLine: last.line, endCol: last.col }
-        host.call('addSelection', Object.assign({ color: penColor, sessionId: sidRef.current }, rangeArgs)).then(function (r) {
+        host.call('addSelection', Object.assign({ color: penColor, sessionId: sidRef.current, remark: typeof remark === 'string' ? remark : '' }, rangeArgs)).then(function (r) {
           if (r && r.ok) {
             revRef.current = r.revision
             setSt(function (prev) { return prev ? Object.assign({}, prev, { revision: r.revision, selections: r.selections }) : prev })
             setLive(null)
-            notify('已选中 第' + (blkRange ? blkRange.from : first.line) + '~' + (blkRange ? blkRange.to : last.line) + ' 行')
+            const lines = '已选中 第' + (blkRange ? blkRange.from : first.line) + '~' + (blkRange ? blkRange.to : last.line) + ' 行'
+            notify(lines + (typeof remark === 'string' && remark.trim() !== '' ? '（含备注）' : ''))
           } else notify(r && r.reason === 'empty' ? '选中的是空白内容' : '选中失败')
         }).catch(function (err) { notify('选中失败: ' + err.message) })
+      }
+      // ── selection remark ────────────────────────────────────────────────────────────
+      // A remark is the reader's own note about one selected passage: typed by long-pressing
+      // [选中] (which opens the input instead of committing immediately), and delivered to the
+      // agent together with the selection text.
+      function saveRemark(id, remark) {
+        host.call('setRemark', { sessionId: sidRef.current, id: id, remark: remark }).then(function (r) {
+          if (r && r.ok) {
+            revRef.current = r.revision
+            setSt(function (prev) { return prev ? Object.assign({}, prev, { revision: r.revision, selections: r.selections }) : prev })
+            notify(r.remark === '' ? '已清除备注' : '已写入备注')
+          } else notify('备注写入失败: ' + ((r && r.error) || '未知原因'))
+        }).catch(function (err) { notify('备注写入失败: ' + ((err && err.message) || String(err))) })
+      }
+      /** Commit the live selection together with a remark, in ONE call. */
+      function commitLiveWithRemark(remark) { commitLive(typeof remark === 'string' ? remark : '') }
+      function closeRemark() {
+        if (remarkTimerRef.current !== null) { try { window.clearTimeout(remarkTimerRef.current) } catch (err) { } remarkTimerRef.current = null }
+        setRemarkFor(null)
+        setRemarkDraft('')
+      }
+      /** Save what the input holds: commit the live selection with it, or update an existing one. */
+      function applyRemark() {
+        const draft = remarkDraft
+        const target = remarkFor
+        closeRemark()
+        if (!target) return
+        if (target.live) { hideBar(); commitLiveWithRemark(draft); return }
+        saveRemark(target.id, draft)
       }
       function flush(silent) {
         if (saveTimer.current) { saveTimer.current(); saveTimer.current = null }
@@ -2220,7 +2280,33 @@ return {
               })) : null,
             ]),
             h('button', { key: 'copy', 'data-act': 'copy', onPointerDown: press(function () { copyText(liveText()).then(function (ok) { notify(ok ? '已复制' : '复制失败') }) }), onClick: tap(function () { copyText(liveText()).then(function (ok) { notify(ok ? '已复制' : '复制失败') }) }) }, '复制'),
-            h('button', { key: 'pick', 'data-act': 'pick', onPointerDown: press(function () { hideBar(); commitLive() }), onClick: tap(function () { hideBar(); commitLive() }) }, '选中'),
+            // [选中]: a short press commits the selection exactly as before, a LONG press opens
+            // the remark input instead (write a note about the passage, then commit both).
+            // Acting on pointerup rather than on pointerdown is what makes both paths work:
+            // `press()` marks the press as handled, which would swallow the click that follows
+            // a short tap, so a short tap would commit nothing at all.
+            h('button', {
+              key: 'pick', 'data-act': 'pick', 'data-long': '备注',
+              title: '选中（长按可加备注）',
+              onPointerDown: function (e) {
+                if (e) { if (e.stopPropagation) e.stopPropagation(); if (e.preventDefault) e.preventDefault() }
+                if (remarkTimerRef.current !== null) { try { window.clearTimeout(remarkTimerRef.current) } catch (err) { } remarkTimerRef.current = null }
+                remarkTimerRef.current = window.setTimeout(function () {
+                  remarkTimerRef.current = null
+                  actedRef.current = Date.now()   // the click that follows must not also commit
+                  setRemarkDraft('')
+                  setRemarkFor({ live: true })
+                }, REMARK_HOLD_MS)
+              },
+              onPointerUp: function () {
+                const pending = remarkTimerRef.current !== null
+                if (pending) { try { window.clearTimeout(remarkTimerRef.current) } catch (err) { } remarkTimerRef.current = null }
+                if (pending) { actedRef.current = Date.now(); hideBar(); commitLive('') }
+              },
+              onPointerLeave: function () { if (remarkTimerRef.current !== null) { try { window.clearTimeout(remarkTimerRef.current) } catch (err) { } remarkTimerRef.current = null } },
+              onPointerCancel: function () { if (remarkTimerRef.current !== null) { try { window.clearTimeout(remarkTimerRef.current) } catch (err) { } remarkTimerRef.current = null } },
+              onClick: tap(function () { hideBar(); commitLive('') }),
+            }, '选中'),
             h('button', { key: 'cancel', 'data-act': 'cancel', onPointerDown: press(function () { hideBar(); setLive(null) }), onClick: tap(function () { hideBar(); setLive(null) }) }, '取消'),
           ]))
         }
@@ -2396,6 +2482,30 @@ return {
         notes.length ? h('button', { className: 'dn-mini', key: 'clr', type: 'button', title: '清空正文（保留 git 历史）', onClick: doClearNote }, '清空正文') : null,
         notes.length ? h('button', { className: 'dn-mini dn-mini-danger', key: 'del', type: 'button', title: '删除整份笔记（含它的 git）', onClick: doDeleteNote }, '删除笔记') : null,
       ])
+      // The remark input: opened by a long press on [选中] (the selection is still live, so
+      // saving commits it WITH the remark in one call), or from a panel row to edit what is
+      // already there.
+      const remarkEditing = remarkFor && !remarkFor.live
+      const remarkEl = remarkFor ? h('div', { className: 'dn-remark', key: 'remark' }, [
+        h('div', { className: 'dn-remark-title', key: 't' }, remarkEditing
+          ? '这条划线的备注（清空即删除备注）'
+          : '给这段选中写个备注（可留空，直接点[选中并保存]）'),
+        h('textarea', {
+          className: 'dn-remark-input', key: 'i', ref: remarkInputRef, value: remarkDraft,
+          placeholder: '例如：这里我总记混，面试被问到要提一下…',
+          onPointerDown: function (e) { e.stopPropagation() },
+          onChange: function (e) { setRemarkDraft(e.target.value) },
+          onKeyDown: function (e) {
+            if (e.key === 'Escape') { e.preventDefault(); closeRemark() }
+            else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); applyRemark() }
+          },
+        }),
+        h('div', { className: 'dn-remark-row', key: 'r' }, [
+          h('span', { className: 'dn-remark-hint', key: 'h' }, 'Ctrl/⌘+Enter 保存 · Esc 取消'),
+          h('button', { key: 'c', 'data-act': 'cancel', type: 'button', onClick: function () { closeRemark() } }, '取消'),
+          h('button', { key: 's', 'data-act': 'save', type: 'button', onClick: function () { applyRemark() } }, remarkEditing ? '保存备注' : '选中并保存'),
+        ]),
+      ]) : null
       const modalEl = noteModal ? h('div', { className: 'dn-modal', key: 'modal' }, [
         h('div', { className: 'dn-modal-box', key: 'box' }, [
           h('div', { className: 'dn-modal-title', key: 't' }, noteModal.kind === 'create' ? '新建笔记' : (noteModal.kind === 'import' ? '导入到《' + noteName + '》' : '重命名《' + noteName + '》')),
@@ -2475,9 +2585,15 @@ return {
               h('span', { key: 'l' }, '第' + s.startLine + ':' + s.startCol + ' -> ' + s.endLine + ':' + s.endCol),
               h('span', { key: 'f' }, s.fetched ? '已取用' : '新'),
               s.stale ? h('span', { key: 'st', style: { color: '#d80' } }, '原文已变动') : null,
+              h('button', {
+                className: 'dn-x', key: 'rm', style: { color: '#4f7cff' },
+                title: s.remark ? '改这条备注' : '给这条划线写备注',
+                onClick: function () { setRemarkDraft(s.remark || ''); setRemarkFor({ id: s.id }) },
+              }, s.remark ? '改备注' : '备注'),
               h('button', { className: 'dn-x', key: 'x', onClick: function () { removeSelection(s.id) } }, '删除'),
             ]),
             h('div', { className: 'dn-sel-text', key: 't' }, s.text),
+            s.remark ? h('div', { className: 'dn-sel-remark', key: 'r' }, '备注：' + s.remark) : null,
           ])
         })
         : [h('div', { key: 'none', style: { color: '#8a8f98' } }, '还没有选中内容。长按正文约 0.4 秒出现选择器，拖动两个圆点确定范围，再点[选中]。')]) : null
@@ -2505,7 +2621,7 @@ return {
         h('div', { className: 'dn-lay dn-lay-back', key: 'layback' }, h('div', { className: 'dn-lay-in', key: 'inb', style: layShift }, layBack)),
         h('div', { className: 'dn-lay dn-lay-front', key: 'layfront' }, h('div', { className: 'dn-lay-in', key: 'inf', style: layShift }, layFront)),
         ]),
-        panelEl, foot, modalEl,
+        panelEl, foot, modalEl, remarkEl,
         toast ? h('div', { className: 'dn-toast', key: 'toast' }, toast) : null,
       ])
     }

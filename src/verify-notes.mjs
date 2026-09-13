@@ -409,6 +409,7 @@ sessions._m.set(SID_D, sessionWith(SID_D, WS))
   await t('note_patch_many', { edits: [{ startLine: 3, startCol: 0, endLine: 3, endCol: 3, text: '第三行' }] })
   await t('note_find', { query: '三行' })
   const added = await t('note_add_selection', { startLine: 1, startCol: 0, endLine: 1, endCol: 6, color: 'pink' })
+  await t('note_set_remark', { id: added && added.id, remark: '工具写的备注' })
   await t('note_get_selections')
   await t('note_take_new_selections')
   await t('note_set_color', { id: added && added.id, color: 'green' })
@@ -431,7 +432,7 @@ const neverCalled = [...tools.keys()].filter((n) => !exercised.has(n))
 ok('every registered tool was exercised on a success path',
   neverCalled.length === 0,
   neverCalled.length ? 'never called: ' + neverCalled.join(',') : exercised.size + ' tools exercised')
-ok('the tool count still matches what the client and the docs expect', tools.size === 22, String(tools.size))
+ok('the tool count still matches what the client and the docs expect', tools.size === 23, String(tools.size))
 
 console.log('every RPC handler answers')
 // One handler, clearSelections, was declared without its `args` parameter while its body used
@@ -463,6 +464,8 @@ sessions._m.set(SID_E, sessionWith(SID_E, WS))
   await call('addSelection', { startLine: 2, startCol: 0, endLine: 2, endCol: 3, color: 'green' })
   const cur = (await call('state', { revision: -1 })).selections || []
   await call('removeSelection', { id: cur.length ? cur[0].id : 'sel-none' })
+  const fresh = await call('addSelection', { startLine: 2, startCol: 0, endLine: 2, endCol: 3, color: 'green' })
+  await call('setRemark', { id: fresh.id, remark: '这条是备注' })
   await call('saveView', { line: 2, anchor: '第二行改' })
   await call('commit', {})
   await call('importNote', { text: '导入\n', mode: 'append' })
@@ -477,7 +480,7 @@ sessions._m.set(SID_E, sessionWith(SID_E, WS))
   // arguments — that is the contract the card codes against (it acts only on ok:true). A
   // handler that crashes internally, or one that refuses for no visible reason, shows up here
   // even when the mock swallows the thrown error. This is what clearSelections failed.
-  const mutating = ['createNote', 'saveText', 'addSelection', 'removeSelection', 'clearSelections', 'saveView', 'commit', 'importNote', 'renameNote', 'selectNote', 'clearNote', 'deleteNote', 'reload']
+  const mutating = ['createNote', 'saveText', 'addSelection', 'removeSelection', 'clearSelections', 'setRemark', 'saveView', 'commit', 'importNote', 'renameNote', 'selectNote', 'clearNote', 'deleteNote', 'reload']
   const notOk = mutating.filter((m) => results[m].ok !== true)
   ok('every mutating RPC answers ok:true on a valid session',
     notOk.length === 0,
@@ -528,6 +531,52 @@ sessions._m.set(SID_F, sessionWith(SID_F, WS))
   ok('a nonsense line is clamped instead of stored',
     clamped.view && clamped.view.line === 1,
     JSON.stringify(clamped.view))
+}
+
+console.log('selection remarks')
+// A remark is the reader's own note about one passage (the long press on [选中] opens the
+// input). Two things matter: it must persist with the selection, and it must reach the model
+// together with the selection text — otherwise the feature is a dead end.
+const SID_H = 'session-remark-9999'
+sessions._m.set(SID_H, sessionWith(SID_H, WS))
+{
+  const r = async (m, a) => (await rpc(m, Object.assign({ sessionId: SID_H }, a || {}))).result || {}
+  await r('createNote', { name: '备注', text: '# 备注\n第一行\n第二行\n第三行\n' })
+  const added = await r('addSelection', { startLine: 2, startCol: 0, endLine: 3, endCol: 3, color: 'pink', remark: '这里我总记混' })
+  const st = await r('state', { revision: -1 })
+  const sel = (st.selections || [])[0] || {}
+  ok('a remark can be written while the selection is created',
+    added.ok === true && sel.remark === '这里我总记混',
+    JSON.stringify({ ok: added.ok, remark: sel.remark }))
+  const stateFile = String(files.get(k(noteDirOf(SID_H, '备注') + '/.note-state.json')) || '')
+  ok('the remark is persisted with the selection',
+    stateFile.indexOf('这里我总记混') >= 0, stateFile.length + ' bytes')
+  // What the MODEL sees: the render function of note_get_selections, not the raw object.
+  const got = await asTool('note_get_selections', {}, SID_H)
+  const tool = tools.get('note_get_selections')
+  const rendered = tool.output.render({}, got).map((p) => p.text).join('\n')
+  ok('the model is given the remark with the selection text',
+    rendered.indexOf('【备注】这里我总记混') >= 0 && rendered.indexOf('第二行') >= 0,
+    rendered.split('\n').slice(0, 4).join(' | '))
+  const plain = await r('addSelection', { startLine: 3, startCol: 0, endLine: 3, endCol: 3 })
+  const plainSel = ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === plain.id) || {}
+  ok('a selection without a remark still reports the field as an empty string',
+    plainSel.remark === '',
+    JSON.stringify({ remark: plainSel.remark }))
+  const changed = await r('setRemark', { id: sel.id, remark: '改过的备注' })
+  const after = (await r('state', { revision: -1 })).selections || []
+  ok('an existing remark can be changed and cleared',
+    changed.ok === true && after[0].remark === '改过的备注' && (await r('setRemark', { id: sel.id, remark: '' })).ok === true && ((await r('state', { revision: -1 })).selections || [])[0].remark === '',
+    JSON.stringify({ changed: changed.ok, now: after[0].remark }))
+  const missing = await r('setRemark', { id: 'sel-nope', remark: 'x' })
+  ok('a remark for a selection that does not exist is refused, not silently created',
+    missing.ok === false && /没有这条选中记录/.test(String(missing.error)),
+    JSON.stringify({ ok: missing.ok, error: missing.error }))
+  const long = await r('addSelection', { startLine: 1, startCol: 0, endLine: 1, endCol: 3, color: 'green', remark: 'x'.repeat(5000) })
+  const longSel = ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === long.id) || {}
+  ok('a remark is bounded in length',
+    typeof longSel.remark === 'string' && longSel.remark.length === 1000,
+    String(longSel.remark && longSel.remark.length))
 }
 
 console.log(failed === 0 ? '\nALL NOTE-MODEL CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')
