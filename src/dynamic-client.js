@@ -161,7 +161,7 @@ const CSS = [
 // ── the mark list (标记列表) ─────────────────────────────────────────────────────
 // Two views: this note, and every note of the session. Rows show the passage rendered as
 // block Markdown, and clicking one jumps the reader there (switching notes when needed).
-'.dn-marks{display:flex;flex-direction:column;min-height:0;max-height:58%;flex:0 1 auto;border-top:1px solid rgba(0,0,0,.1);}',
+'.dn-marks{display:flex;flex-direction:column;min-height:0;flex:0 0 auto;border-top:1px solid rgba(0,0,0,.1);}',
 '.dn-marks-head{display:flex;align-items:center;gap:6px;padding:7px 10px;border-bottom:1px solid rgba(0,0,0,.06);flex:0 0 auto;}',
 '.dn-marks-title{font-size:12.5px;font-weight:600;}',
 '.dn-tabs{display:flex;gap:4px;margin-left:auto;}',
@@ -1131,6 +1131,15 @@ return {
         if (!toast) return undefined
         return ctx.timeout(function () { setToast('') }, 3200)
       }, [toast])
+      // Re-assert the plugin stylesheet once the card is really on screen. The bundle
+      // build injects it at apply time, but a later re-apply can leave that tag removed
+      // by a stale disposer (that is exactly how the card once came up completely
+      // unstyled: 38000px body, mark list with no scroll). `ensureStyle` only exists in
+      // the permanent bundle; the dynamic form uses the `styles` service instead.
+      React.useEffect(function () {
+        try { if (typeof ensureStyle === 'function') ensureStyle() } catch (err) { }
+        return undefined
+      }, [])
       // A session with no note shows no card at all: the note space is per session and
       // starts empty, and /window-note (or note_create) is the explicit way to begin.
       const visible = !!st && !hidden && notes.length > 0
@@ -3038,7 +3047,13 @@ return {
           return acc
         }, [])
         : selList.map(function (m) { return markRow(m, noteName, false) })
-      const panelEl = panel ? h('div', { className: 'dn-marks', key: 'sel' }, [
+      // A definite pixel height, not a percentage: on the phone layout the card's height is not
+      // always a definite value for % to resolve against, and flex-shrink happily squeezed this
+      // panel to zero (reported: the list showed nothing but its header row). Measured from the
+      // card itself, so every layout gets a value that is actually true.
+      const cardPx = rootRef.current ? rootRef.current.clientHeight : (bounds.h || 800)
+      const panelPx = Math.max(140, Math.min(460, Math.round(cardPx * 0.5)))
+      const panelEl = panel ? h('div', { className: 'dn-marks', key: 'sel', style: { height: panelPx + 'px' } }, [
         h('div', { className: 'dn-marks-head', key: 'h' }, [
           h('span', { className: 'dn-marks-title', key: 't' }, '标记'),
           h('span', { className: 'dn-tabs', key: 'tabs' }, [
