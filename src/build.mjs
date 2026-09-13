@@ -26,6 +26,19 @@ const root = path.resolve(here, '..')
 const lib = path.join(root, 'lib')
 fs.mkdirSync(lib, { recursive: true })
 
+// A UTF-8 BOM in a shipped file takes the whole profile down: dsh JSON.parses every
+// bundle's package.json, and JSON.parse rejects a BOM ("... is not valid JSON"), so
+// `dsh web` cannot boot at all. Fail here, where the cause is obvious, instead of
+// there. An editor — or PowerShell 5.1's `Set-Content -Encoding UTF8` — is the
+// usual author of one.
+for (const rel of ['package.json', 'cordis.patch.yml']) {
+  const bytes = fs.readFileSync(path.join(root, rel))
+  if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+    throw new Error(rel + ' carries a UTF-8 BOM, which stops dsh from booting — re-save it without one '
+      + '(e.g. node -e "const f=require(\'fs\');const p=\'' + rel + '\';f.writeFileSync(p, f.readFileSync(p,\'utf8\').replace(/^\\uFEFF/,\'\'))")')
+  }
+}
+
 const readLines = (file) => fs.readFileSync(file, 'utf8').replace(/\r\n?/g, '\n').split('\n')
 const count = (text, needle) => text.split(needle).length - 1
 

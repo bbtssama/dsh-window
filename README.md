@@ -205,7 +205,12 @@ node src/verify-reanchor.mjs    # 重新锚定：外部编辑后选中对象如�
   （真实 harness 拒收，而笔记其实建好了）。现在校验器两种形式都认，并且**每个注册的工具都至少被成功调用一次**。
 - **RPC handler 少写一个形参就是"点了没反应"**：`clearSelections` 曾经是唯一一个写成 `async function ()`
   却用 `args` 的 handler，每次调用都抛错；而客户端只认 `ok:true`、又没有 `.catch`，于是按钮既不生效也不报错
-  （rejection 会被 shell 抛出来，必须两边都挂错误分支）。现在 17 个 handler 全部被调用并断言 `ok:true`。
+  （rejection 会被 shell 抛出来，必须两边都挂错误分支）。现在 19 个 handler 全部被调用并断言 `ok:true`。
+- **一个 UTF-8 BOM 能让整个 dsh 起不来**：dsh 组合 profile 时会 `JSON.parse` 每个 bundle 的 `package.json`，
+  而 `JSON.parse` 拒绝 BOM —— `dsh web` 直接死在 `SyntaxError: Unexpected token '﻿'`，整个 harness 都进不去。
+  真实事故来源是 PowerShell 5.1 的 `Set-Content -Encoding utf8` 写版本号。现在三处独立把关：
+  `build.mjs` 见到 BOM 直接抛、`install.mjs` 在装出去前剥掉并打印、`selftest` 检查**仓库与已安装两份**的全部产物
+  （`package.json` / `cordis.patch.yml` / `README.md` / `lib/*.js`）以及 profile 清单。
 
 ---
 

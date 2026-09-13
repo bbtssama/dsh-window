@@ -1,7 +1,7 @@
-﻿{
+{
   "name": "dsh-window",
   "version": "0.0.4",
-  "description": "Floating Markdown note card for the DeepSeek Harness web GUI: per-session multi-note spaces, long-press highlighting with colours and your own remarks, reading-position memory, per-note git history, Mermaid rendering, and 23 note_* model tools that keep the agent's context cost low.",
+  "description": "Floating Markdown note card for the DeepSeek Harness web GUI: per-session multi-note spaces, long-press marks with four colours, italic and underline and your own remarks, reading-position memory, per-note git history, Mermaid rendering, and 26 note_* model tools that keep the agent's context cost low.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

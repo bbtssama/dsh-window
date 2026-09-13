@@ -46,6 +46,19 @@ for (const file of ['lib/index.js', 'lib/client.js', 'cordis.patch.yml', 'packag
   if (!fs.existsSync(path.join(dest, file))) throw new Error('install is missing ' + file)
 }
 
+// Publishing is the last gate before a profile boots, so a BOM must not get through:
+// dsh JSON.parses the bundle's package.json, JSON.parse rejects a BOM, and `dsh web`
+// dies with "… is not valid JSON" before it can compose anything. Strip it here and
+// name the file, so the source can be cleaned up too (src/build.mjs fails on one).
+for (const rel of ['package.json', 'cordis.patch.yml']) {
+  const file = path.join(dest, rel)
+  const bytes = fs.readFileSync(file)
+  if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) {
+    fs.writeFileSync(file, bytes.subarray(3))
+    console.log('  note  : stripped a UTF-8 BOM from ' + rel + ' (a BOM stops dsh from booting)')
+  }
+}
+
 // ── 2. reconcile the profile bundle list ────────────────────────────────────
 const manifestPath = path.join(profileDir, 'package.json')
 // Strip a BOM: editors and PowerShell write one, and JSON.parse rejects it.

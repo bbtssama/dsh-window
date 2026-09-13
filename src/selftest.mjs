@@ -178,6 +178,36 @@ async function rpc(method, args, httpMethod = 'POST') {
 const notPost = await rpc('state', null, 'GET')
 ok('rejects a non-POST request with 405', notPost.status === 405, String(notPost.status))
 
+// A UTF-8 BOM in a shipped file is not cosmetic: dsh JSON.parses each bundle's package.json
+// while composing the profile, and JSON.parse rejects a BOM, so ONE BOM makes `dsh web` die
+// with "… is not valid JSON" and the whole harness never boots. That happened for real (a
+// PowerShell `Set-Content -Encoding utf8` version bump wrote one), so every shipped file —
+// in the repo AND in the installed copy, which is what the profile actually loads — is
+// checked here, together with the profile manifest that lists this bundle.
+const repoRoot = path.resolve(here, '..')
+const installedRoot = path.resolve(lib, '..')
+const profileRoot = path.resolve(lib, '..', '..', '..')
+const bomFiles = []
+const checkBom = (file, label) => {
+  let bytes = null
+  try { bytes = fs.readFileSync(file) } catch (err) { return }
+  if (bytes.length >= 3 && bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) bomFiles.push(label)
+}
+const exists = (file) => { try { return fs.statSync(file).isFile() } catch (err) { return false } }
+for (const rel of ['package.json', 'cordis.patch.yml', 'README.md', 'lib/index.js', 'lib/client.js']) {
+  checkBom(path.join(repoRoot, rel), 'repo ' + rel)
+  checkBom(path.join(installedRoot, rel), 'installed ' + rel)
+}
+checkBom(path.join(profileRoot, 'package.json'), 'profile manifest')
+ok('no shipped file carries a UTF-8 BOM', bomFiles.length === 0, bomFiles.length ? bomFiles.join(', ') : 'clean')
+// The exact file dsh parses at boot: parse it the same way it does.
+const installedManifest = path.join(installedRoot, 'package.json')
+if (exists(installedManifest)) {
+  let why = ''
+  try { JSON.parse(fs.readFileSync(installedManifest, 'utf8')) } catch (err) { why = String((err && err.message) || err) }
+  ok('the installed package.json parses as JSON (dsh does this at boot)', why === '', why || 'ok')
+}
+
 const unknown = await rpc('no_such_method', {})
 ok('answers an unknown method with 404 + ok:false', unknown.status === 404 && unknown.parsed && unknown.parsed.ok === false, unknown.raw.slice(0, 90))
 
