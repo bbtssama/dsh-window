@@ -383,18 +383,25 @@ sessions._m.set(SID_G, sessionWith(SID_G, WS))
   // poll: one with a matching pair (skipped) and one after a summon (delivered).
   await runCmd('stop', SID_G)
   const base = (await rpc('state', { revision: -1, sessionId: SID_G })).result
-  const idlePoll = await rpc('state', { revision: base.revision, uiRevision: base.uiRevision, sessionId: SID_G })
+  const idlePoll = await rpc('state', { revision: base.revision, uiRevision: base.uiRevision, note: base.active, sessionId: SID_G })
   ok('a poll with nothing changed is still skipped',
     idlePoll.result && idlePoll.result.unchanged === true,
     JSON.stringify(idlePoll.result && { unchanged: idlePoll.result.unchanged }))
+  // The client echoes the note it is displaying. A revision is only a per-note in-memory
+  // counter, so "same revision, different note" must NOT be mistaken for "nothing changed" —
+  // that is the "笔记第一次加载很久都不会加载出来" report.
+  const otherNote = await rpc('state', { revision: base.revision, uiRevision: base.uiRevision, note: 'another-note', sessionId: SID_G })
+  ok('the same revision for a different note is answered in full',
+    otherNote.result && otherNote.result.unchanged !== true,
+    JSON.stringify(otherNote.result && { unchanged: otherNote.result.unchanged, active: otherNote.result.active }))
   await runCmd('start', SID_G)
-  const pollAfterSummon = await rpc('state', { revision: base.revision, uiRevision: base.uiRevision, sessionId: SID_G })
+  const pollAfterSummon = await rpc('state', { revision: base.revision, uiRevision: base.uiRevision, note: base.active, sessionId: SID_G })
   ok('summoning reaches the next poll, with no reload',
     pollAfterSummon.result && pollAfterSummon.result.unchanged !== true &&
     pollAfterSummon.result.summoned === true && pollAfterSummon.result.uiRevision > base.uiRevision,
     JSON.stringify(pollAfterSummon.result && { unchanged: pollAfterSummon.result.unchanged, summoned: pollAfterSummon.result.summoned, ui: pollAfterSummon.result.uiRevision, was: base.uiRevision }))
   await runCmd('stop', SID_G)
-  const pollAfterStop = await rpc('state', { revision: base.revision, uiRevision: pollAfterSummon.result.uiRevision, sessionId: SID_G })
+  const pollAfterStop = await rpc('state', { revision: base.revision, uiRevision: pollAfterSummon.result.uiRevision, note: base.active, sessionId: SID_G })
   ok('dismissing reaches the next poll too',
     pollAfterStop.result && pollAfterStop.result.unchanged !== true && pollAfterStop.result.summoned === false,
     JSON.stringify(pollAfterStop.result && { unchanged: pollAfterStop.result.unchanged, summoned: pollAfterStop.result.summoned }))
@@ -432,6 +439,13 @@ sessions._m.set(SID_D, sessionWith(SID_D, WS))
   await t('note_find', { query: '三行' })
   const added = await t('note_add_selection', { startLine: 1, startCol: 0, endLine: 1, endCol: 6, color: 'pink' })
   await t('note_set_remark', { id: added && added.id, remark: '工具写的备注' })
+  const goto = await t('note_goto', { line: 3 })
+  ok('note_goto moves the card and is reported back', goto.ok === true && goto.line === 3 && typeof goto.anchor === 'string', JSON.stringify({ ok: goto.ok, line: goto.line }))
+  const panel = await t('note_panel', { action: 'start' })
+  ok('note_panel summons the card', panel.ok === true && panel.summoned === true, JSON.stringify({ ok: panel.ok, summoned: panel.summoned }))
+  ok('note_list reports where the reader is in each note', (await t('note_list')).notes.every(function (n) { return typeof n.line === 'number' }), 'rows carry a line')
+  const readAfterGoto = await t('note_read')
+  ok('note_read tells the agent which line the user is on', readAfterGoto.viewLine === 3, JSON.stringify({ viewLine: readAfterGoto.viewLine }))
   await t('note_get_selections')
   await t('note_take_new_selections')
   await t('note_set_color', { id: added && added.id, color: 'green' })
@@ -454,7 +468,7 @@ const neverCalled = [...tools.keys()].filter((n) => !exercised.has(n))
 ok('every registered tool was exercised on a success path',
   neverCalled.length === 0,
   neverCalled.length ? 'never called: ' + neverCalled.join(',') : exercised.size + ' tools exercised')
-ok('the tool count still matches what the client and the docs expect', tools.size === 23, String(tools.size))
+ok('the tool count still matches what the client and the docs expect', tools.size === 25, String(tools.size))
 
 console.log('every RPC handler answers')
 // One handler, clearSelections, was declared without its `args` parameter while its body used

@@ -66,8 +66,8 @@ const hostHandleHits = count(hostBody, "handleLocked('")
 // rewrite their own implementations to the permanent-plugin equivalents.
 hostBody = hostBody.replaceAll('harness.registerTool(ctx, ', 'ctx.tools.register(')
 hostBody = hostBody.replaceAll('harness.handle(', 'handle(')
-if (hostToolHits !== 23) throw new Error('host: expected 23 tool registrations, saw ' + hostToolHits)
-// 15 note tools + 8 note management tools + 17 rpc handlers
+if (hostToolHits !== 25) throw new Error('host: expected 25 tool registrations, saw ' + hostToolHits)
+// 17 note tools + 8 note management tools + 17 rpc handlers (no new RPCs)
 // (state/saveText/addSelection/saveView/…/importNote)
 if (hostHandleHits !== 17) throw new Error('host: expected 17 rpc handlers, saw ' + hostHandleHits)
 if (hostBody.includes('harness.')) throw new Error('host: a harness.* reference survived')
