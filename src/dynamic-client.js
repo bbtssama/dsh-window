@@ -48,7 +48,7 @@ const CSS = [
 '.dn-root .dn-lay .dn-loupe{position:absolute;padding:5px 10px;border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid rgba(0,0,0,.2);box-shadow:0 6px 20px rgba(0,0,0,.3);z-index:9;pointer-events:none;font-size:16px;line-height:1.45;white-space:nowrap;overflow:hidden;text-align:center;color:inherit;}',
 '.dn-root .dn-lay .dn-loupe-caret{display:inline-block;width:2px;height:1.1em;vertical-align:-.18em;background:#e5484d;margin:0 0.5px;}',
 '.dn-pen{display:inline-flex;align-items:center;position:relative;}',
-'.dn-pen-sw{width:18px;height:18px;border-radius:4px;border:1px solid rgba(0,0,0,.28);cursor:pointer;padding:0;margin:0 1px;}',
+'.dn-pen-sw{width:20px;height:20px;border-radius:6px;border:1px solid rgba(0,0,0,.22);cursor:pointer;padding:0;margin:0 1px;flex:0 0 auto;}',
 '.dn-pen-sw[data-c=yellow]{background:rgba(255,214,0,.95);}',
 '.dn-pen-sw[data-c=pink]{background:rgba(255,138,190,.95);}',
 '.dn-pen-sw[data-c=green]{background:rgba(112,214,140,.95);}',
@@ -56,7 +56,7 @@ const CSS = [
 '.dn-pen-sw[data-c=none]{background:repeating-linear-gradient(45deg,rgba(0,0,0,.08) 0 4px,transparent 4px 8px);}',
 '.dn-pen-sw[data-c=italic]{background:transparent;font-style:italic;font-family:Georgia,serif;font-size:13px;line-height:1;color:inherit;}',
 '.dn-pen-sw[data-c=underline]{background:transparent;text-decoration:underline;text-decoration-thickness:1.5px;font-size:12.5px;line-height:1;color:inherit;}',
-'.dn-pen-sw[data-on=true]{outline:2px solid var(--dsw-alias-label-primary,#1b1b1b);outline-offset:1px;}',
+'.dn-pen-sw[data-on=true]{outline:2px solid rgba(79,124,255,.75);outline-offset:1px;}',
 '.dn-bar{z-index:6;}',
 '.dn-handle{z-index:6;}',
 '.dn-pen-pop{position:absolute;bottom:26px;left:-4px;display:flex;padding:5px;border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid rgba(0,0,0,.14);box-shadow:0 6px 18px rgba(0,0,0,.18);z-index:3;}',
@@ -165,8 +165,14 @@ const CSS = [
 // The bar matches every other popover in the card (light surface, hairline border, one accent
 // for the primary action). It used to be a dark slab, which read as a different application
 // sitting on top of the note — and it is the SAME kind of control as the mark function card.
-'.dn-bar{position:absolute;display:inline-flex;gap:3px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid rgba(0,0,0,.14);border-radius:11px;padding:4px;box-shadow:0 10px 26px rgba(0,0,0,.22);pointer-events:auto;z-index:6;touch-action:none;overscroll-behavior:contain;}',
-'.dn-bar button{border:0;background:0 0;color:inherit;font-size:12.5px;font-weight:500;line-height:1.2;padding:6px 12px;border-radius:8px;cursor:pointer;font-family:inherit;touch-action:none;-webkit-tap-highlight-color:transparent;}',
+//
+// `width:max-content` + `white-space:nowrap` are load-bearing: the bar is absolutely positioned
+// inside the overlay's zero-width inner box, so an auto width resolved to zero and every CJK
+// label wrapped character by character (复/制, 标/记, 取/消 in the reported screenshot).
+'.dn-bar{position:absolute;display:inline-flex;align-items:center;gap:4px;width:max-content;white-space:nowrap;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid rgba(0,0,0,.14);border-radius:11px;padding:4px 6px;box-shadow:0 10px 26px rgba(0,0,0,.22);pointer-events:auto;z-index:6;touch-action:none;overscroll-behavior:contain;}',
+'.dn-bar-group{display:inline-flex;align-items:center;gap:2px;}',
+'.dn-bar-sep{width:1px;height:16px;background:rgba(0,0,0,.12);margin:0 2px;flex:0 0 auto;}',
+'.dn-bar button{border:0;background:0 0;color:inherit;font-size:12.5px;font-weight:500;line-height:1.2;padding:6px 10px;border-radius:8px;cursor:pointer;font-family:inherit;white-space:nowrap;word-break:keep-all;touch-action:none;-webkit-tap-highlight-color:transparent;}',
 '.dn-bar button:hover{background:rgba(79,124,255,.12);}',
 '.dn-bar button[data-act=pick]{background:#4f7cff;color:#fff;font-weight:600;}',
 '.dn-bar button[data-act=pick]:hover{background:#3f6bea;}',
@@ -1071,6 +1077,12 @@ return {
       const menuRef = React.useRef(null)
       const [mcardSize, setMcardSize] = React.useState(null)
       const footRef = React.useRef(null)
+      // The action bar's own width is only known after it renders, so it is clamped by
+      // measurement: the bar is absolutely positioned inside a clipped, zero-width overlay box,
+      // and without this its left edge was cut off by the card's border (the colour swatch was
+      // sliced in half, since the bar's left was only bounded below).
+      const barRef = React.useRef(null)
+      const [barShift, setBarShift] = React.useState(0)
       const uiAckRef = React.useRef(0)
       // The italic/underline run table (see styleRunsFor): declared here because the component
       // bails out early for the collapsed pill, and no hook may run past that point.
@@ -1510,6 +1522,20 @@ return {
         try { document.addEventListener('pointerdown', onDown, true) } catch (err) { }
         return function () { try { document.removeEventListener('pointerdown', onDown, true) } catch (err) { } }
       }, [menuOpen])
+      // Measure the action bar once it is on screen and keep it inside the body's box: the
+      // overlay clips, and a bar anchored to a caret near the right edge lost its buttons.
+      React.useEffect(function () {
+        const el = barRef.current
+        const host = bodyRef.current
+        if (!el || !host) return undefined
+        const r = el.getBoundingClientRect()
+        const hr = host.getBoundingClientRect()
+        const over = r.right - (hr.right - 6)
+        const under = (hr.left + 6) - r.left
+        const want = over > 0 ? Math.round(over) : (under > 0 ? -Math.round(under) : 0)
+        setBarShift(function (prev) { return prev === want ? prev : want })
+        return undefined
+      }, [live, barReady, penOpen, barShift])
       // Measure the mark card once it is on screen so the clamp above uses its real size (a
       // first paint with an estimate would otherwise still kiss the footer on a tall card).
       React.useEffect(function () {
@@ -3533,13 +3559,34 @@ return {
             const maxTop = barHost.scrollTop + barHost.clientHeight - BAR_H - 6
             barTop = Math.min(Math.max(barTop, minTop), Math.max(minTop, maxTop))
           }
-          layFront.push(h('div', { className: 'dn-bar', key: 'bar', style: { left: Math.max(4, anchor.x - 10) + 'px', top: barTop + 'px', pointerEvents: ovPe } }, [
-            h('span', { className: 'dn-pen', key: 'pen' }, [
-              h('button', { className: 'dn-pen-sw', key: 'cur', 'data-c': penColor, 'data-on': 'true', title: '本次底色（默认黄）', onPointerDown: press(function () { setPenOpen(!penOpen) }), onClick: tap(function () { setPenOpen(!penOpen) }) }),
-              penOpen ? h('span', { className: 'dn-pen-pop', key: 'pop' }, PEN_COLORS.map(function (c) {
-                return h('button', { className: 'dn-pen-sw', key: c, 'data-c': c, title: c === 'none' ? '无色（不铺底）' : c, 'data-on': c === penColor ? 'true' : 'false', onPointerDown: press(function () { setPenColor(c); writePenColor(c); setPenOpen(false) }), onClick: tap(function () { setPenColor(c); writePenColor(c); setPenOpen(false) }) })
-              })) : null,
+          layFront.push(h('div', { className: 'dn-bar', key: 'bar', ref: barRef, style: { left: Math.max(6, anchor.x - 10 - barShift) + 'px', top: barTop + 'px', pointerEvents: ovPe } }, [
+            // Left group = HOW this mark looks (colour + the two text styles, all combinable),
+            // right group = what to DO with the selection. Two groups, one divider: the bar used
+            // to be one long row with the style buttons stranded at the far right, past 取消.
+            h('span', { className: 'dn-bar-group', key: 'look' }, [
+              h('span', { className: 'dn-pen', key: 'pen' }, [
+                h('button', { className: 'dn-pen-sw', key: 'cur', 'data-c': penColor, 'data-on': 'true', title: '本次底色（默认黄；none = 不铺底）', onPointerDown: press(function () { setPenOpen(!penOpen) }), onClick: tap(function () { setPenOpen(!penOpen) }) }),
+                penOpen ? h('span', { className: 'dn-pen-pop', key: 'pop' }, PEN_COLORS.map(function (c) {
+                  return h('button', { className: 'dn-pen-sw', key: c, 'data-c': c, title: c === 'none' ? '无色（不铺底）' : c, 'data-on': c === penColor ? 'true' : 'false', onPointerDown: press(function () { setPenColor(c); writePenColor(c); setPenOpen(false) }), onClick: tap(function () { setPenColor(c); writePenColor(c); setPenOpen(false) }) })
+                })) : null,
+              ]),
+              // The two text styles, as independent toggles: they combine with each other and with
+              // any colour, and they are chosen HERE (before the mark exists) rather than only
+              // being fixable afterwards.
+              h('button', {
+                className: 'dn-pen-sw', key: 'it', 'data-c': 'italic', 'data-on': penItalic ? 'true' : 'false',
+                title: '本次标记用斜体（可与颜色、下划线叠加）',
+                onPointerDown: press(function () { setPenItalic(!penItalic) }),
+                onClick: tap(function () { setPenItalic(!penItalic) }),
+              }, 'I'),
+              h('button', {
+                className: 'dn-pen-sw', key: 'ul', 'data-c': 'underline', 'data-on': penUnderline ? 'true' : 'false',
+                title: '本次标记用下划线（可与颜色、斜体叠加）',
+                onPointerDown: press(function () { setPenUnderline(!penUnderline) }),
+                onClick: tap(function () { setPenUnderline(!penUnderline) }),
+              }, 'U'),
             ]),
+            h('span', { className: 'dn-bar-sep', key: 'sep' }),
             h('button', { key: 'copy', 'data-act': 'copy', onPointerDown: press(function () { copyText(liveText()).then(function (ok) { notify(ok ? '已复制' : '复制失败') }) }), onClick: tap(function () { copyText(liveText()).then(function (ok) { notify(ok ? '已复制' : '复制失败') }) }) }, '复制'),
             // [选中]: a short press commits the selection exactly as before, a LONG press opens
             // the remark input instead (write a note about the passage, then commit both).
@@ -3569,23 +3616,6 @@ return {
               onClick: tap(function () { hideBar(); commitLive('') }),
             }, '标记'),
             h('button', { key: 'cancel', 'data-act': 'cancel', onPointerDown: press(function () { hideBar(); setLive(null) }), onClick: tap(function () { hideBar(); setLive(null) }) }, '取消'),
-            // The two text styles, as independent toggles: they combine with each other and with
-            // any colour, and they are chosen HERE (before the mark exists) rather than only
-            // being fixable afterwards.
-            h('span', { className: 'dn-pen', key: 'style' }, [
-              h('button', {
-                className: 'dn-pen-sw', key: 'it', 'data-c': 'italic', 'data-on': penItalic ? 'true' : 'false',
-                title: '本次标记用斜体（可与颜色、下划线叠加）',
-                onPointerDown: press(function () { setPenItalic(!penItalic) }),
-                onClick: tap(function () { setPenItalic(!penItalic) }),
-              }, 'I'),
-              h('button', {
-                className: 'dn-pen-sw', key: 'ul', 'data-c': 'underline', 'data-on': penUnderline ? 'true' : 'false',
-                title: '本次标记用下划线（可与颜色、斜体叠加）',
-                onPointerDown: press(function () { setPenUnderline(!penUnderline) }),
-                onClick: tap(function () { setPenUnderline(!penUnderline) }),
-              }, 'U'),
-            ]),
           ]))
         }
       }
