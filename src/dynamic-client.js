@@ -4538,7 +4538,9 @@ return {
         const dot = light ? h('span', { key: 'd', className: 'dn-git-dot dn-git-' + (light === true ? 'ok' : light), title: ({ idle: '无需 git 操作', pending: 'git 正在后台处理…', ok: '已提交到它自己的仓库', error: 'git 操作失败' })[light === true ? 'ok' : light] || '' }) : null
         return h('button', {
           className: 'dn-menu-item' + (cls ? ' ' + cls : ''), key: key, type: 'button', 'data-on': on ? '1' : '0',
-          style: indent ? { paddingLeft: (8 + indent) + 'px' } : undefined,
+          // `indent` is a DEPTH, not a pixel count: 1px per level was invisible. 12px per level,
+          // capped so a deep path cannot squeeze the label away (the label ellipsises anyway).
+          style: indent ? { paddingLeft: (8 + Math.min(indent, 6) * 12) + 'px' } : undefined,
           onClick: function (e) { e.stopPropagation(); if (keep !== true) setMenuOpen(null); fn() },
         }, dot === null ? label : [h('span', { key: 'l', className: 'dn-menu-item-label' }, label), dot])
       }
