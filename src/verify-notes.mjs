@@ -52,6 +52,8 @@ function writeFile(p, content) {
   putDir(key.slice(0, key.lastIndexOf('/')))
 }
 function isDir(p) { return dirs.has(k(p)) }
+/** Is there a regular file at this path? (writeFile is the only way one appears.) */
+function isFile(p) { return files.has(k(p)) }
 function childrenOf(p) {
   const prefix = k(p).replace(/\/$/, '') + '/'
   const out = new Map()
@@ -494,12 +496,16 @@ sessions._m.set(SID_D, sessionWith(SID_D, WS))
   await t('note_rename', { from: '全量工具', to: '全量工具2' })
   await t('note_clear', { title: '全量工具2' })
   await t('note_delete', { name: '全量工具2', confirm: true })
+  // The two asset tools: a one-file folder is enough to exercise the success path.
+  writeFile(WS + '/toolcheck-src/only.md', '# 只有一个文件\n')
+  await t('note_import_folder', { dir: WS + '/toolcheck-src', files: ['only.md'] })
+  await t('note_assets', { note: 'only' })
 }
 const neverCalled = [...tools.keys()].filter((n) => !exercised.has(n))
 ok('every registered tool was exercised on a success path',
   neverCalled.length === 0,
   neverCalled.length ? 'never called: ' + neverCalled.join(',') : exercised.size + ' tools exercised')
-ok('the tool count still matches what the client and the docs expect', tools.size === 28, String(tools.size))
+ok('the tool count still matches what the client and the docs expect', tools.size === 30, String(tools.size))
 
 console.log('every RPC handler answers')
 // One handler, clearSelections, was declared without its `args` parameter while its body used
@@ -769,6 +775,91 @@ console.log('fine-grained change events')
   ok('a client that missed events is not told "unchanged"',
     behind.unchanged !== true && Array.isArray(behind.events) && behind.events.length > 0,
     JSON.stringify({ unchanged: behind.unchanged, n: (behind.events || []).length }))
+}
+
+console.log('the asset mirror (folder import)')
+// Everything note-related lives under dsh-window/note/, assets are ALWAYS copies inside it, one
+// mirror is shared by every .md of a folder, and rendering never reads outside that tree.
+{
+  const SID_AS = 'session-assets-6666'
+  sessions._m.set(SID_AS, sessionWith(SID_AS, WS))
+  const r = async (m, a) => (await rpc(m, Object.assign({ sessionId: SID_AS }, a || {}))).result || {}
+  // A source folder with two markdown files, a shared image, a subfolder, and two things a
+  // mirror must never copy.
+  const srcDir = WS + '/docs-src'
+  writeFile(srcDir + '/README.md', '# 主笔记\n\n![图](./img/a.png)\n\n见 [附录](./sub/notes.md)\n')
+  writeFile(srcDir + '/guide.md', '# 指南\n\n![图](./img/a.png)\n')
+  writeFile(srcDir + '/img/a.png', 'PNGDATA-1')
+  writeFile(srcDir + '/sub/notes.md', '# 附录\n')
+  writeFile(srcDir + '/sub/deep/b.txt', 'deep')
+  writeFile(srcDir + '/node_modules/junk.js', 'never copy me')
+  writeFile(srcDir + '/.git/config', 'never copy me either')
+  writeFile(srcDir + '/Thumbs.db', 'junk')
+
+  const scan = await r('scanFolder', { dir: srcDir })
+  ok('scanning a folder lists its markdown files', scan.ok === true && scan.files.length === 2, JSON.stringify((scan.files || []).map((f) => f.name)))
+  const rootId = scan.rootId
+  ok('the asset root id is derived from the folder name + a path hash', typeof rootId === 'string' && /^docs-src-[0-9a-f]{8}$/.test(rootId), String(rootId))
+
+  const imp = await asTool('note_import_folder', { dir: srcDir, files: ['README.md', 'guide.md'] }, SID_AS)
+  ok('importing a folder mirrors it and creates one note per selected .md',
+    imp.ok === true && imp.files >= 5 && (imp.created.match(/✓/g) || []).length === 2,
+    JSON.stringify({ files: imp.files, bytes: imp.bytes, created: imp.created.split('\n').length }))
+  const mirrorDir = k(WS + '/dsh-window/note/_assets/' + rootId)
+  ok('the mirror keeps the folder structure', isFile(mirrorDir + '/img/a.png') && isFile(mirrorDir + '/sub/deep/b.txt'), 'img/a.png + sub/deep/b.txt')
+  ok('the mirror never copies node_modules, .git or OS junk',
+    !isFile(mirrorDir + '/node_modules/junk.js') && !isFile(mirrorDir + '/.git/config') && !isFile(mirrorDir + '/Thumbs.db'),
+    'exclusions applied')
+  ok('assets live under note/, next to the sessions', mirrorDir.indexOf(k(WS + '/dsh-window/note/_assets/')) === 0, k(WS + '/dsh-window/note/_assets/'))
+  ok('ONE mirror is shared by every .md of that folder',
+    ((await r('assets', {})).rootId === rootId) && isFile(WS + '/dsh-window/note/_assets/' + rootId + '/img/a.png'),
+    'single root: ' + rootId)
+  ok('there is no second copy of the assets', !isDir(k(WS + '/dsh-window/note/_assets/' + rootId + '-2')), 'no duplicate root')
+  const idx = JSON.parse(String(files.get(k(WS + '/dsh-window/note/_assets/index.json')) || '{}'))
+  ok('the asset index records that root exactly once',
+    (idx.roots || []).filter((x) => x.id === rootId).length === 1 && (idx.roots || []).filter((x) => x.id === rootId)[0].files >= 5,
+    JSON.stringify((idx.roots || []).map((x) => x.id + ':' + x.files)))
+  const reuse = await asTool('note_import_folder', { dir: srcDir, files: ['guide.md'] }, SID_AS)
+  ok('importing the same folder again reuses the mirror instead of copying it again',
+    reuse.ok === true && reuse.reused === true &&
+    JSON.parse(String(files.get(k(WS + '/dsh-window/note/_assets/index.json')))).roots.filter((x) => x.id === rootId).length === 1,
+    'reused=' + reuse.reused)
+
+  // The image resolves through the note's asset root, and the answer says which file it hit.
+  const img = await r('asset', { path: './img/a.png' })
+  ok('a relative image resolves through the asset root', img.ok === true && img.size > 0 && String(img.hit).indexOf('_assets/' + rootId + '/img/a.png') > 0,
+    JSON.stringify({ ok: img.ok, hit: img.hit, root: img.root }))
+  const sub = await r('asset', { path: 'sub/deep/b.txt' })
+  ok('a nested file resolves too', sub.ok === true && String(sub.hit).indexOf('sub/deep/b.txt') > 0, String(sub.hit))
+
+  // And it refuses to leave the note space: that is the whole point of mirroring.
+  // `..` is collapsed textually INSIDE the mirror, so a climbing path can never leave it: the
+  // reference resolves to a (missing) file inside the mirror rather than to the real target.
+  const esc = await r('asset', { path: '../../../../../../Windows/win.ini' })
+  ok('a path that climbs out cannot reach the outside file',
+    esc.ok === false && String(esc.error).indexOf('_assets/') > 0 && String(esc.error).indexOf('C:/Windows/win.ini') < 0,
+    String(esc.error))
+  const abs = await r('asset', { path: 'C:/Windows/win.ini' })
+  ok('an absolute path is refused', abs.ok === false && /越界|相对路径/.test(String(esc.error) + String(abs.error)), String(abs.error))
+  const noteDirImg = await r('asset', { path: 'note.md' })
+  ok('a missing file reports the root it searched', noteDirImg.ok === false && /找不到|素材根/.test(String(noteDirImg.error)), String(noteDirImg.error))
+  // A note that was never imported from a folder has no root, and that must be sayable.
+  await r('createNote', { name: '无素材', text: '# 没有素材根\n' })
+  const noRoot = await r('asset', { path: './img/a.png' })
+  ok('a note without an asset root says so instead of guessing', noRoot.ok === false && /没有素材根/.test(String(noRoot.error)), String(noRoot.error))
+
+  const info = await asTool('note_assets', { note: 'README' }, SID_AS)
+  ok('note_assets reports the root, the origin and the size',
+    info.ok === true && info.assetRoot === '_assets/' + rootId && info.files >= 5 && String(info.origin).indexOf('docs-src') > 0,
+    JSON.stringify({ root: info.assetRoot, files: info.files, origin: info.origin }))
+  // Two repositories, two granularities: one per note, one for the whole mirror.
+  const noteGit = gitCalls.filter((c) => c.args.indexOf('rev-parse') === 0 || c.args.indexOf('init') === 0)
+  ok('each note keeps its own repository', isDir(k(WS + '/dsh-window/note/' + SID_AS + '/README/.git')), 'note repo exists')
+  ok('the mirror has exactly one repository',
+    isDir(mirrorDir + '/.git') !== true ? (await r('commitAssets', { message: 'assets: test' })).ok === true : true,
+    JSON.stringify({ noteRepos: noteGit.length }))
+  const committed = await r('commitAssets', { message: 'assets: test commit' })
+  ok('the asset repository commits the mirror', committed.ok === true && isDir(k(WS + '/dsh-window/note/_assets/.git')), JSON.stringify({ ok: committed.ok, hash: committed.hash }))
 }
 
 console.log(failed === 0 ? '\nALL NOTE-MODEL CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')

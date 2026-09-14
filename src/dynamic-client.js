@@ -230,6 +230,13 @@ const CSS = [
 '.dn-mact{border:0;background:transparent;color:#4f7cff;font-size:11px;padding:3px 5px;cursor:pointer;border-radius:5px;white-space:nowrap;word-break:keep-all;flex:0 0 auto;}',
 '.dn-mact:hover{background:rgba(79,124,255,.1);}',
 '.dn-mact-del{color:#d33;}',
+// The folder-import dialog: the path row and the checklist of .md files found in it.
+'.dn-dirline{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}',
+'.dn-dirline input{flex:1 1 140px;min-width:120px;}',
+'.dn-filelist{max-height:190px;overflow-y:auto;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:4px 6px;margin:2px 0;}',
+'.dn-filerow{display:flex;align-items:center;gap:7px;padding:3px 2px;font-size:12px;cursor:pointer;}',
+'.dn-filerow input{flex:0 0 auto;margin:0;}',
+'.dn-filerow span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
 // The list's own close button (the window form keeps 收回, but a list you dismissed by hand
 // should not need the toolbar button to close it).
 '.dn-marks-close{border:0;background:transparent;color:#8a8f98;font-size:13px;line-height:1;padding:4px 6px;border-radius:6px;cursor:pointer;}',
@@ -3883,6 +3890,22 @@ return {
           } catch (err) { reject(err) }
         })
       }
+      /** Import a folder: mirror it on the host, then create one note per checked .md. */
+      function submitFolderImport() {
+        const dir = String((noteModal && noteModal.dir) || '').trim()
+        const picked = ((noteModal && noteModal.files) || []).filter(function (f) { return f.on === true }).map(function (f) { return f.name })
+        if (dir === '') { notify('先填一个文件夹路径'); return }
+        if (!picked.length) { notify('至少勾选一个 .md'); return }
+        setBusy('正在镜像并导入…')
+        host.call('importFolder', { sessionId: sidRef.current, dir: dir, files: picked }).then(function (r) {
+          setBusy('')
+          if (!r || !r.ok) { notify((r && r.error) || '导入失败'); return }
+          setNoteModal(null)
+          refreshNotes()
+          notify('已导入 ' + picked.length + ' 份笔记；镜像 ' + r.files + ' 个文件 / ' + Math.round((r.bytes || 0) / 1024) + ' KB'
+            + (r.reused ? '（复用已有素材根）' : '') + '\n' + String(r.created || '').split('\n').slice(0, 6).join('\n'))
+        }).catch(function (err) { setBusy(''); notify('导入失败: ' + ((err && err.message) || String(err))) })
+      }
       function submitCreate() {
         const m = noteModal || {}
         const name = String(m.name || '').trim()
@@ -4009,18 +4032,69 @@ return {
           h('button', { key: 's', 'data-act': 'save', type: 'button', onClick: function () { applyRemark() } }, remarkEditing ? '保存备注' : '标记并保存'),
         ]),
       ]) : null
+      const folderModal = noteModal && noteModal.kind === 'folder'
       const modalEl = noteModal ? h('div', { className: 'dn-modal', key: 'modal' }, [
         h('div', { className: 'dn-modal-box', key: 'box' }, [
-          h('div', { className: 'dn-modal-title', key: 't' }, noteModal.kind === 'create' ? '新建笔记' : (noteModal.kind === 'import' ? '导入到《' + noteName + '》' : '重命名《' + noteName + '》')),
-          noteModal.kind === 'rename' ? null : h('input', {
+          h('div', { className: 'dn-modal-title', key: 't' }, folderModal ? '从文件夹导入（整目录镜像）'
+            : (noteModal.kind === 'create' ? '新建笔记' : (noteModal.kind === 'import' ? '导入到《' + noteName + '》' : '重命名《' + noteName + '》'))),
+          folderModal ? h('div', { className: 'dn-dirline', key: 'dir' }, [
+            h('input', {
+              className: 'dn-modal-input', key: 'd', placeholder: '文件夹绝对路径，例如 D:/notes/linux',
+              value: noteModal.dir || '',
+              onChange: function (e) { const v = e.target.value; setNoteModal(function (p) { return Object.assign({}, p, { dir: v, files: [] }) }) },
+            }),
+            h('button', {
+              className: 'dn-mini', key: 'pick', type: 'button', title: '让 host 弹出系统目录选择框',
+              onClick: function () {
+                notify('正在打开目录选择框…')
+                host.call('pickFolder', {}).then(function (r) {
+                  if (r && r.ok && r.dir) setNoteModal(function (p) { return Object.assign({}, p, { dir: r.dir, files: [] }) })
+                  else notify((r && r.error) || '没有选择目录')
+                }).catch(function (err) { notify('目录选择失败: ' + ((err && err.message) || String(err))) })
+              },
+            }, '选择文件夹…'),
+            h('button', {
+              className: 'dn-mini', key: 'scan', type: 'button', title: '列出这个目录里的 .md',
+              onClick: function () {
+                const dir = String(noteModal.dir || '').trim()
+                if (dir === '') { notify('先填一个文件夹路径'); return }
+                host.call('scanFolder', { sessionId: sidRef.current, dir: dir }).then(function (r) {
+                  if (!r || !r.ok) { notify((r && r.error) || '扫描失败'); return }
+                  setNoteModal(function (p) {
+                    return Object.assign({}, p, { files: (r.files || []).map(function (f) { return { name: f.name, size: f.size, on: true } }), rootId: r.rootId })
+                  })
+                  if (!(r.files || []).length) notify('这个目录里没有 .md 文件')
+                }).catch(function (err) { notify('扫描失败: ' + ((err && err.message) || String(err))) })
+              },
+            }, '扫描 .md'),
+          ]) : null,
+          folderModal && noteModal.files && noteModal.files.length ? h('div', { className: 'dn-filelist', key: 'list' },
+            noteModal.files.map(function (f, i) {
+              return h('label', { className: 'dn-filerow', key: f.name + i }, [
+                h('input', {
+                  key: 'c', type: 'checkbox', checked: f.on === true,
+                  onChange: function () {
+                    setNoteModal(function (p) {
+                      const next = (p.files || []).map(function (x, k) { return k === i ? Object.assign({}, x, { on: !x.on }) : x })
+                      return Object.assign({}, p, { files: next })
+                    })
+                  },
+                }),
+                h('span', { key: 'n', title: f.name }, f.name),
+                h('span', { key: 's', style: { color: '#8a8f98', marginLeft: 'auto', flex: '0 0 auto' } }, Math.max(1, Math.round((f.size || 0) / 1024)) + 'KB'),
+              ])
+            })) : null,
+          folderModal ? h('div', { key: 'hint', style: { fontSize: '11px', color: '#8a8f98', lineHeight: '1.6' } },
+            '整个目录会被镜像到 note/_assets/（排除 .git / node_modules 等），选中的每个 .md 各建一份笔记并共享这一份镜像；图片按相对路径直接可用。') : null,
+          folderModal ? null : (noteModal.kind === 'rename' ? null : h('input', {
             className: 'dn-modal-input', key: 'name', placeholder: '笔记名（会作为目录名）', value: noteModal.name || '',
             onChange: function (e) { const v = e.target.value; setNoteModal(function (p) { return Object.assign({}, p, { name: v }) }) },
-          }),
-          noteModal.kind === 'rename' ? h('input', {
+          })),
+          folderModal ? null : (noteModal.kind === 'rename' ? h('input', {
             className: 'dn-modal-input', key: 'newname', placeholder: '新名字', value: noteModal.name || '',
             onChange: function (e) { const v = e.target.value; setNoteModal(function (p) { return Object.assign({}, p, { name: v }) }) },
-          }) : null,
-          noteModal.kind === 'rename' ? null : h('textarea', {
+          }) : null),
+          folderModal || noteModal.kind === 'rename' ? null : h('textarea', {
             className: 'dn-modal-text', key: 'text', placeholder: '把 Markdown 粘贴到这里（也可以直接把文件拖到卡片上/点下面的选择文件）',
             value: noteModal.text || '',
             onChange: function (e) { const v = e.target.value; setNoteModal(function (p) { return Object.assign({}, p, { text: v }) }) },
@@ -4031,7 +4105,7 @@ return {
           ]) : null,
           noteModal.fileName ? h('div', { className: 'dn-modal-file', key: 'f' }, '已选择文件：' + noteModal.fileName) : null,
           h('div', { className: 'dn-modal-actions', key: 'a' }, [
-            h('label', { className: 'dn-mini', key: 'pick' }, [
+            folderModal ? null : h('label', { className: 'dn-mini', key: 'pick' }, [
               '选择文件…',
               h('input', {
                 key: 'i', type: 'file', style: { display: 'none' },
@@ -4042,8 +4116,10 @@ return {
             h('button', { className: 'dn-mini', key: 'cancel', type: 'button', onClick: function () { setNoteModal(null) } }, '取消'),
             h('button', {
               className: 'dn-mini dn-mini-primary', key: 'ok', type: 'button',
-              onClick: noteModal.kind === 'create' ? submitCreate : (noteModal.kind === 'import' ? submitImport : submitRename),
-            }, noteModal.kind === 'create' ? '创建' : (noteModal.kind === 'import' ? '导入' : '重命名')),
+              onClick: folderModal ? submitFolderImport : (noteModal.kind === 'create' ? submitCreate : (noteModal.kind === 'import' ? submitImport : submitRename)),
+            }, folderModal
+              ? ('镜像并导入 ' + ((noteModal.files || []).filter(function (f) { return f.on }).length) + ' 个')
+              : (noteModal.kind === 'create' ? '创建' : (noteModal.kind === 'import' ? '导入' : '重命名'))),
           ]),
         ]),
       ]) : null
@@ -4364,6 +4440,14 @@ return {
           items.push(h('div', { className: 'dn-menu-sep', key: 's1' }))
           items.push(mi('new', '新建笔记…', false, function () { setNoteModal({ kind: 'create', name: '', text: '' }) }))
           items.push(mi('imp', '导入到当前笔记…', false, function () { setNoteModal({ kind: 'import', text: '', mode: 'append' }) }))
+          items.push(mi('fold', '从文件夹导入（整目录镜像）…', false, function () { setNoteModal({ kind: 'folder', dir: '', files: [] }) }))
+          items.push(mi('asset', '当前笔记的素材信息', false, function () {
+            host.call('assets', { sessionId: sidRef.current }).then(function (r) {
+              if (!r || !r.ok) { notify((r && r.error) || '读不到素材信息'); return }
+              if (!r.assetRoot) { notify('这份笔记没有素材根（从文件夹导入的笔记才有）'); return }
+              notify('素材根 ' + r.assetRoot + '\n来源 ' + (r.origin || '—') + '\n镜像 ' + r.files + ' 文件 / ' + Math.round((r.bytes || 0) / 1024) + ' KB')
+            }).catch(function (err) { notify('读不到素材信息: ' + ((err && err.message) || String(err))) })
+          }))
           items.push(mi('ren', '重命名当前笔记…', false, function () { setNoteModal({ kind: 'rename', name: noteName }) }))
           items.push(h('div', { className: 'dn-menu-sep', key: 's2' }))
           items.push(mi('clr', '清空正文（保留 git 历史）', false, doClearNote))
