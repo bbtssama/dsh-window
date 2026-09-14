@@ -2575,6 +2575,58 @@ return {
         made: intOr(r.made, 0), existing: intOr(r.existing, 0), created: lines, error: r.error,
       }
     })
+    /**
+     * Follow a link into the mirror: a local `.md` reference becomes (or reopens) a note that
+     * SHARES the same asset root, so the document's own images and its relative links to its
+     * neighbours keep working. This is what makes a mirrored folder readable as a whole instead
+     * of one isolated file.
+     */
+    handleLocked('openMirrorDoc', async function (args) {
+      await ensureLoaded()
+      const href = String((args && args.href) || '').trim()
+      if (href === '') return { ok: false, error: '需要 href' }
+      if (/^[a-z]+:\/\//i.test(href) || /^[A-Za-z]:/.test(href) || href.indexOf('\\') >= 0) {
+        return { ok: false, error: '只支持笔记内的相对链接' }
+      }
+      const meta = await readNoteMeta(activeNote)
+      const root = typeof meta.assetRoot === 'string' ? meta.assetRoot : ''
+      if (root === '') return { ok: false, error: '这份笔记没有素材根，无法跟随链接' }
+      const rel = href.split('#')[0].replace(/\\/g, '/').split('/').reduce(function (acc, seg) {
+        if (seg === '' || seg === '.') return acc
+        if (seg === '..') { acc.pop(); return acc }
+        acc.push(seg)
+        return acc
+      }, []).join('/')
+      if (rel === '') return { ok: false, error: '链接指向了空路径' }
+      if (!/\.(md|markdown)$/i.test(rel)) return { ok: false, error: '这不是 Markdown 文档：' + rel + '（素材文件不在这里打开）' }
+      const mirrorPrefix = noteSpaceRoot() + '/' + ASSETS_DIR + '/'
+      const rootId = root.replace(/^.*?_assets\//, '')
+      const target = mirrorPrefix + rootId + '/' + rel
+      if (target.indexOf(mirrorPrefix) !== 0) return { ok: false, error: '链接越界，已拒绝' }
+      let text = null
+      try {
+        const raw = await readIfExists(target)
+        if (raw !== null) text = String(raw).replace(/\r\n?/g, '\n')
+      } catch (err) { }
+      if (text === null) return { ok: false, error: '镜像里没有这个文件：' + rel }
+      const fileName = rel.split('/').pop()
+      const want = sanitizeNoteName(fileName.replace(/\.(md|markdown)$/i, ''))
+      if (!want) return { ok: false, error: '这个文件名不能作为笔记名：' + fileName }
+      const names = await listNoteDirs()
+      if (names.indexOf(want) >= 0) {
+        const r = await selectNote(want)
+        return { ok: r.ok === true, note: want, existed: true, error: r.ok ? '' : String(r.error || '') }
+      }
+      // The ORIGIN is the source-folder path this mirror entry came from, so a later sync of the
+      // new note re-reads the user's own file rather than the mirror.
+      const index = await readAssetsIndex()
+      const entry = index.roots.filter(function (r) { return r && r.id === rootId })[0] || null
+      const sourceDir = entry && typeof entry.source === 'string' ? entry.source.replace(/\\/g, '/').replace(/\/+$/, '') : ''
+      const origin = sourceDir === '' ? '' : sourceDir + '/' + rel
+      const made = await createNoteFromText(want, text, { assetRoot: ASSETS_DIR + '/' + rootId, origin: origin, followedFrom: String(href) })
+      if (!made.ok) return { ok: false, note: want, error: String(made.error || '') }
+      return { ok: true, note: want, existed: false, source: origin, error: '' }
+    })
     /** The asset mirror's one repository: commit what the mirror holds right now. */
     handleLocked('commitAssets', async function (args) {
       await ensureLoaded()

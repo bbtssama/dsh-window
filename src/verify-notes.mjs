@@ -940,6 +940,33 @@ console.log('the asset mirror (folder import)')
   ok('note_assets reports the root, the origin and the size',
     info.ok === true && info.assetRoot === '_assets/' + rootId && info.files >= 5 && String(info.origin).indexOf('docs-src') > 0,
     JSON.stringify({ root: info.assetRoot, files: info.files, origin: info.origin }))
+  // ── following a link into the mirror ────────────────────────────────────────────
+  // `[附录](./sub/notes.md)` must open that document as a note SHARING the same asset root, so a
+  // mirrored folder reads as a whole instead of bouncing the browser to a missing path.
+  await r('selectNote', { name: 'README' })
+  const link = await r('openMirrorDoc', { href: './sub/notes.md' })
+  ok('a relative .md link opens as a note that shares the asset root',
+    link.ok === true && link.note === 'notes' && link.existed === false,
+    JSON.stringify({ ok: link.ok, note: link.note, existed: link.existed }))
+  const linkedMeta = JSON.parse(String(files.get(k(WS + '/dsh-window/note/' + SID_AS + '/notes/note.json')) || '{}'))
+  ok('the followed note shares the SAME mirror',
+    linkedMeta.assetRoot === '_assets/' + rootId, JSON.stringify(linkedMeta))
+  ok('the followed note\u2019s origin points back at the source folder, not the mirror',
+    String(linkedMeta.origin) === srcDir + '/sub/notes.md', String(linkedMeta.origin))
+  ok('the followed note has its own repository',
+    gitCalls.some((c) => c.dir === k(WS + '/dsh-window/note/' + SID_AS + '/notes')), 'git init ran for it')
+  const again2 = await r('openMirrorDoc', { href: './sub/notes.md' })
+  ok('following the same link again just switches to that note',
+    again2.ok === true && again2.existed === true, JSON.stringify({ existed: again2.existed }))
+  const outsideLink = await r('openMirrorDoc', { href: '../../../../../../etc/passwd.md' })
+  ok('a link that climbs out of the mirror is refused',
+    outsideLink.ok === false && /镜像里没有|越界/.test(String(outsideLink.error)), String(outsideLink.error))
+  const absLink = await r('openMirrorDoc', { href: 'C:/Windows/win.ini' })
+  ok('an absolute link is refused', absLink.ok === false && /相对链接/.test(String(absLink.error)), String(absLink.error))
+  const notMd = await r('openMirrorDoc', { href: './img/a.png' })
+  ok('a non-markdown link explains itself instead of opening something odd',
+    notMd.ok === false && /不是 Markdown/.test(String(notMd.error)), String(notMd.error))
+
   // Two repositories, two granularities: one per note, one for the whole mirror.
   const noteGit = gitCalls.filter((c) => c.args.indexOf('rev-parse') === 0 || c.args.indexOf('init') === 0)
   ok('each note keeps its own repository', isDir(k(WS + '/dsh-window/note/' + SID_AS + '/README/.git')), 'note repo exists')
