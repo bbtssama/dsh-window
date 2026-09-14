@@ -2892,7 +2892,12 @@ return {
         const mirrorPrefix = noteSpaceRoot() + '/' + ASSETS_DIR + '/'
         const safe = mirrorPrefix + String(root).replace(/^.*?_assets\//, '') + '/' + rel
         const norm = joinInsideMirror(safe)
-        if (norm.indexOf(mirrorPrefix) !== 0) return { ok: false, error: '越界：' + p + ' 解析到了 note/_assets 之外，已拒绝' }
+        // Compare like with like: `mirrorPrefix` is built from the session's workspace (native
+        // separators on Windows) while the resolved path is always forward-slash, so a raw prefix
+        // test rejected EVERY image with 越界 — measured on a real note whose mirror was present and
+        // correct (218 files, images/ holding 216). My own acceptance harness passed because it fed
+        // the workspace with forward slashes: the test normalised what the real world does not.
+        if (norm.indexOf(mirrorPrefix.replace(/\\/g, '/')) !== 0) return { ok: false, error: '越界：' + p + ' 解析到了 note/_assets 之外，已拒绝' }
         let lastErr = ''
         try {
           const target = await fs.resolve(norm)
