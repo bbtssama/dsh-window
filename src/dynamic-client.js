@@ -48,15 +48,18 @@ const CSS = [
 '.dn-root .dn-lay .dn-loupe{position:absolute;padding:5px 10px;border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid rgba(0,0,0,.2);box-shadow:0 6px 20px rgba(0,0,0,.3);z-index:9;pointer-events:none;font-size:16px;line-height:1.45;white-space:nowrap;overflow:hidden;text-align:center;color:inherit;}',
 '.dn-root .dn-lay .dn-loupe-caret{display:inline-block;width:2px;height:1.1em;vertical-align:-.18em;background:#e5484d;margin:0 0.5px;}',
 '.dn-pen{display:inline-flex;align-items:center;position:relative;}',
-'.dn-pen-sw{width:20px;height:20px;border-radius:6px;border:1px solid rgba(0,0,0,.22);cursor:pointer;padding:0;margin:0 1px;flex:0 0 auto;}',
+// Every swatch is one fixed box that centres its glyph. The I and the U were drawn as bare text
+// next to a 20px colour square, so their baselines drifted apart (italic Georgia sits high, an
+// underlined U sits low) and the row looked crooked.
+'.dn-pen-sw{width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;border-radius:7px;border:1px solid rgba(0,0,0,.22);cursor:pointer;padding:0;margin:0 1px;flex:0 0 auto;font-size:12px;line-height:1;font-family:inherit;}',
 '.dn-pen-sw[data-c=yellow]{background:rgba(255,214,0,.95);}',
 '.dn-pen-sw[data-c=pink]{background:rgba(255,138,190,.95);}',
 '.dn-pen-sw[data-c=green]{background:rgba(112,214,140,.95);}',
 '.dn-pen-sw[data-c=black]{background:rgba(22,24,28,.95);}',
 '.dn-pen-sw[data-c=none]{background:repeating-linear-gradient(45deg,rgba(0,0,0,.08) 0 4px,transparent 4px 8px);}',
-'.dn-pen-sw[data-c=italic]{background:transparent;font-style:italic;font-family:Georgia,serif;font-size:13px;line-height:1;color:inherit;}',
-'.dn-pen-sw[data-c=underline]{background:transparent;text-decoration:underline;text-decoration-thickness:1.5px;font-size:12.5px;line-height:1;color:inherit;}',
-'.dn-pen-sw[data-on=true]{outline:2px solid rgba(79,124,255,.75);outline-offset:1px;}',
+'.dn-pen-sw[data-c=italic]{background:transparent;font-style:italic;font-family:Georgia,serif;font-size:14px;line-height:1;color:inherit;}',
+'.dn-pen-sw[data-c=underline]{background:transparent;text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:2px;font-size:13px;line-height:1;color:inherit;}',
+'.dn-pen-sw[data-on=true]{outline:2px solid rgba(79,124,255,.7);outline-offset:1px;}',
 '.dn-bar{z-index:6;}',
 '.dn-handle{z-index:6;}',
 '.dn-pen-pop{position:absolute;bottom:26px;left:-4px;display:flex;padding:5px;border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid rgba(0,0,0,.14);box-shadow:0 6px 18px rgba(0,0,0,.18);z-index:3;}',
@@ -191,7 +194,7 @@ const CSS = [
 '.dn-marks-head{display:flex;align-items:center;gap:6px;padding:7px 10px;border-bottom:1px solid rgba(0,0,0,.06);flex:0 0 auto;flex-wrap:wrap;}',
 '.dn-marks-title{font-size:12.5px;font-weight:600;}',
 '.dn-tabs{display:flex;gap:4px;margin-left:auto;}',
-'.dn-tab{border:1px solid rgba(0,0,0,.14);background:transparent;color:inherit;font-size:11.5px;padding:4px 9px;border-radius:999px;cursor:pointer;}',
+'.dn-tab{border:1px solid rgba(0,0,0,.14);background:transparent;color:inherit;font-size:11.5px;padding:4px 9px;border-radius:999px;cursor:pointer;white-space:nowrap;word-break:keep-all;flex:0 0 auto;}',
 '.dn-tab-on{background:rgba(79,124,255,.12);border-color:rgba(79,124,255,.5);color:#2f5fd0;font-weight:600;}',
 '.dn-marks-refresh{border:0;background:transparent;color:#6b7280;font-size:11.5px;cursor:pointer;padding:4px 6px;}',
 '.dn-marks-body{overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;padding:8px 10px;min-height:0;flex:1 1 auto;}',
@@ -216,12 +219,15 @@ const CSS = [
 '.dn-mark-rail-u{text-decoration:underline;text-decoration-thickness:1.2px;font-weight:700;}',
 '.dn-mark-flash{animation:dn-flash 1.1s ease-out 1;}',
 '@keyframes dn-flash{0%{background:rgba(79,124,255,.28);}100%{background:rgba(0,0,0,.015);}}',
-'.dn-mark-top{display:flex;align-items:center;gap:6px;font-size:10.5px;color:#8a8f98;}',
-'.dn-mark-where{color:#6b7280;}',
-'.dn-mark-badge{border:1px solid rgba(0,0,0,.12);border-radius:999px;padding:0 6px;}',
+'.dn-mark-top{display:flex;align-items:center;gap:6px;font-size:10.5px;color:#8a8f98;flex-wrap:wrap;}',
+'.dn-mark-where{color:#6b7280;white-space:nowrap;}',
+'.dn-mark-badge{border:1px solid rgba(0,0,0,.12);border-radius:999px;padding:0 6px;white-space:nowrap;}',
 '.dn-badge-warn{border-color:rgba(216,128,0,.5);color:#d80;}',
-'.dn-mark-acts{margin-left:auto;display:flex;gap:2px;}',
-'.dn-mact{border:0;background:transparent;color:#4f7cff;font-size:11px;padding:3px 5px;cursor:pointer;border-radius:5px;}',
+// The actions are buttons with Chinese labels: they must never be squeezed into one character
+// per line (that is what a narrow card did to 展开 / 样式 / 添加到 / 备注 / 删除). They keep their
+// own width and the row wraps as a whole instead.
+'.dn-mark-acts{margin-left:auto;display:flex;gap:2px;flex-wrap:wrap;justify-content:flex-end;}',
+'.dn-mact{border:0;background:transparent;color:#4f7cff;font-size:11px;padding:3px 5px;cursor:pointer;border-radius:5px;white-space:nowrap;word-break:keep-all;flex:0 0 auto;}',
 '.dn-mact:hover{background:rgba(79,124,255,.1);}',
 '.dn-mact-del{color:#d33;}',
 // The list's own close button (the window form keeps 收回, but a list you dismissed by hand
@@ -239,19 +245,20 @@ const CSS = [
 // line, which is exactly what it looked like — and clamping it to the card's own box, above the
 // footer, is the only way that cannot happen again.
 '.dn-mcard{position:absolute;z-index:90;display:flex;flex-direction:column;gap:6px;padding:7px 8px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1b1b1b);border:1px solid rgba(0,0,0,.14);border-radius:10px;box-shadow:0 10px 26px rgba(0,0,0,.22);font-size:12px;}',
-'.dn-mcard-row{display:flex;align-items:center;gap:4px;}',
-'.dn-mcard-sw{width:22px;height:22px;border-radius:6px;border:1px solid rgba(0,0,0,.18);cursor:pointer;padding:0;display:inline-flex;align-items:center;justify-content:center;font-size:12px;line-height:1;background:transparent;color:inherit;}',
+'.dn-mcard-sw{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;border-radius:7px;border:1px solid rgba(0,0,0,.18);cursor:pointer;padding:0;flex:0 0 auto;font-size:12px;line-height:1;background:transparent;color:inherit;}',
+'.dn-mcard-row{display:flex;align-items:center;gap:4px;flex-wrap:wrap;}',
 '.dn-mcard-sw[data-on="1"]{outline:2px solid rgba(79,124,255,.65);outline-offset:1px;}',
 '.dn-mcard-sw[data-c=yellow]{background:rgba(255,214,0,.55);}',
 '.dn-mcard-sw[data-c=pink]{background:rgba(255,138,190,.55);}',
 '.dn-mcard-sw[data-c=green]{background:rgba(112,214,140,.55);}',
 '.dn-mcard-sw[data-c=black]{background:#20242c;color:#fff;}',
 '.dn-mcard-sw[data-c=none]{background:repeating-linear-gradient(45deg,rgba(0,0,0,.06) 0 4px,transparent 4px 8px);}',
-'.dn-mcard-btn{border:1px solid rgba(0,0,0,.12);background:transparent;color:inherit;font-size:11.5px;padding:3px 8px;border-radius:7px;cursor:pointer;}',
+'.dn-mcard-btn{border:1px solid rgba(0,0,0,.12);background:transparent;color:inherit;font-size:11.5px;padding:3px 8px;border-radius:7px;cursor:pointer;white-space:nowrap;word-break:keep-all;flex:0 0 auto;}',
 '.dn-mcard-btn:hover{background:rgba(79,124,255,.1);}',
 '.dn-mcard-btn[data-primary="1"]{border-color:rgba(79,124,255,.5);color:#2f5fd0;font-weight:600;}',
 '.dn-mcard-sep{width:1px;height:16px;background:rgba(0,0,0,.12);margin:0 2px;}',
-'.dn-addlist{min-width:180px;max-width:260px;max-height:320px;overflow-y:auto;}',
+'.dn-addlist{width:250px;max-width:100%;max-height:320px;overflow-y:auto;}',
+'.dn-addlist .dn-mcard-row{flex-wrap:wrap;}',
 // One menu for the card's own chrome (the note picker, the mark view, the overflow actions) and
 // for 添加到. Also absolute inside the card, so a long menu can never hang off the card edge.
 '.dn-menu{position:absolute;z-index:92;display:flex;flex-direction:column;gap:2px;padding:6px;min-width:150px;max-width:280px;max-height:320px;overflow-y:auto;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1b1b1b);border:1px solid rgba(0,0,0,.14);border-radius:10px;box-shadow:0 10px 26px rgba(0,0,0,.22);}',
@@ -289,8 +296,11 @@ const CSS = [
 '.dn-remark-hint{margin-right:auto;font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);}',
 '.dn-sel-remark{white-space:pre-wrap;word-break:break-word;margin-top:4px;padding:3px 6px;border-left:3px solid #4f7cff;background:rgba(79,124,255,.08);border-radius:0 5px 5px 0;}',
 '.dn-x{margin-left:auto;border:0;background:transparent;color:#d33;cursor:pointer;font-size:12px;padding:4px 6px;}',
-'.dn-pill{position:fixed;right:16px;bottom:20px;pointer-events:auto;z-index:60;height:34px;border:1px solid rgba(0,0,0,.16);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1,#fff) 92%,transparent);backdrop-filter:blur(16px);box-shadow:0 8px 28px rgba(0,0,0,.16);color:var(--dsw-alias-label-secondary,#555);font:inherit;font-size:12px;font-weight:600;line-height:20px;cursor:pointer;border-radius:999px;display:inline-flex;align-items:center;gap:7px;padding:0 12px;}',
+'.dn-pill{position:fixed;right:16px;bottom:20px;pointer-events:auto;z-index:60;height:34px;border:1px solid rgba(0,0,0,.16);background:color-mix(in srgb,var(--dsw-alias-bg-layer-1,#fff) 92%,transparent);backdrop-filter:blur(16px);box-shadow:0 8px 28px rgba(0,0,0,.16);color:var(--dsw-alias-label-secondary,#555);font:inherit;font-size:12px;font-weight:600;line-height:20px;cursor:pointer;border-radius:999px;display:inline-flex;align-items:center;gap:7px;padding:0 12px;touch-action:none;}',
 '.dn-pill:hover{transform:translateY(-1px);}',
+// A dragged pill: no transition while the finger is on it, and a grab cursor for the mouse.
+'.dn-pill[data-drag="1"]{cursor:grabbing;}',
+'.dn-pill[data-dragged="1"]{transition:none;}',
 '.dn-pillcount{color:#3b6fe0;}',
 '.dn-toast{position:absolute;left:50%;bottom:44px;transform:translateX(-50%);background:rgba(0,0,0,.82);color:#fff;font-size:12px;padding:6px 12px;border-radius:8px;pointer-events:none;z-index:9;max-width:90%;}',
 '.dn-mmd{border:1px solid rgba(0,0,0,.12);border-radius:10px;padding:10px;margin:10px 0;background:rgba(0,0,0,.02);overflow:auto;}',
@@ -351,6 +361,25 @@ const COMPACT_W = 640, DOCK_TOP = 34, DOCK_RIGHT = 18, DOCK_BOTTOM = 18
 // exactly what made the list feel like it "started over every time".
 const MARKS_PREF_KEY = 'dsh-window:marks:v1'
 const MARKS_WIN_MIN_W = 220, MARKS_WIN_MIN_H = 140
+// Where the reader parked the collapsed 笔记 pill on a phone. Desktop keeps the pill at its
+// designed corner (the position is only applied in the compact layout), but the drag itself is
+// available to both — a mouse is a perfectly good way to move it while testing on a desktop.
+const PILL_KEY = 'dsh-window:pill:v1'
+function readPillPos() {
+  try {
+    const raw = window.localStorage.getItem(PILL_KEY)
+    const o = raw ? JSON.parse(raw) : null
+    if (o && typeof o.x === 'number' && typeof o.y === 'number' && isFinite(o.x) && isFinite(o.y)) return { x: o.x, y: o.y }
+    return null
+  } catch (err) { return null }
+}
+function writePillPos(pos) {
+  try {
+    if (pos === null) window.localStorage.removeItem(PILL_KEY)
+    else window.localStorage.setItem(PILL_KEY, JSON.stringify({ x: Math.round(pos.x), y: Math.round(pos.y) }))
+    return true
+  } catch (err) { return false }
+}
 function readMarksPref() {
   try {
     const raw = window.localStorage.getItem(MARKS_PREF_KEY)
@@ -1083,6 +1112,13 @@ return {
       // sliced in half, since the bar's left was only bounded below).
       const barRef = React.useRef(null)
       const [barShift, setBarShift] = React.useState(0)
+      // The collapsed pill's parked position (phones only — see readPillPos) and the live drag.
+      const [pillPos, setPillPos] = React.useState(readPillPos)
+      const pillDragRef = React.useRef(null)
+      const pillMovedRef = React.useRef(false)
+      // The 添加到 popover measures itself too: it is clamped with its real size, otherwise a
+      // 250px panel anchored near the right edge was cut off by the card's border.
+      const [addSize, setAddSize] = React.useState(null)
       const uiAckRef = React.useRef(0)
       // The italic/underline run table (see styleRunsFor): declared here because the component
       // bails out early for the collapsed pill, and no hook may run past that point.
@@ -1508,6 +1544,16 @@ return {
         try { document.addEventListener('pointerdown', onDown, true) } catch (err) { }
         return function () { try { document.removeEventListener('pointerdown', onDown, true) } catch (err) { } }
       }, [addFor, addBox, menuOpen])
+      React.useEffect(function () {
+        if (!addFor && !addBox) return undefined
+        const el = addBoxRef.current
+        if (!el) return undefined
+        const r = el.getBoundingClientRect()
+        const w = Math.round(r.width)
+        const h = Math.round(r.height)
+        setAddSize(function (prev) { return prev && prev.w === w && prev.h === h ? prev : { w: w, h: h } })
+        return undefined
+      }, [addFor && addFor.markId, addBox && addBox.x, addSize === null])
       React.useEffect(function () {
         if (!menuOpen) return undefined
         const onDown = function (ev) {
@@ -3135,7 +3181,65 @@ return {
       // which is the same behaviour it had before.
       if (!(notes.length > 0) && st.summoned !== true) return null
       if (hidden) {
-        return h('button', { className: 'dn-pill', title: '展开笔记卡片', onClick: function () { setHidden(false) }, 'data-note-pill': '' }, [
+        // The pill can be dragged out of the way (a phone's bottom corner is exactly where the
+        // browser chrome and the thumb live). A tap still expands the card: the drag only takes
+        // over after a few pixels of movement. The parked position applies to the COMPACT layout;
+        // on desktop the pill keeps its designed corner.
+        const parked = geo.compact && pillPos ? pillPos : null
+        const pillBox = geo.compact ? 44 : 34
+        const pillShift = function (e, dx, dy) {
+          const vw = bounds.w || 400
+          const vh = bounds.h || 800
+          const w = e && e.currentTarget ? e.currentTarget.offsetWidth : 96
+          const hh = e && e.currentTarget ? e.currentTarget.offsetHeight : pillBox
+          return {
+            x: clamp(dx, 6, Math.max(6, vw - w - 6)),
+            y: clamp(dy, 6, Math.max(6, vh - hh - 6)),
+          }
+        }
+        return h('button', {
+          className: 'dn-pill', title: '展开笔记卡片（可拖动）', 'data-note-pill': '',
+          'data-dragged': pillPos ? '1' : '0',
+          style: parked ? { left: parked.x + 'px', top: parked.y + 'px', right: 'auto', bottom: 'auto' } : undefined,
+          onPointerDown: function (e) {
+            const el = e.currentTarget
+            const r = el.getBoundingClientRect()
+            pillMovedRef.current = false
+            pillDragRef.current = { x0: e.clientX, y0: e.clientY, w: r.width, h: r.height, x: r.left, y: r.top, moved: false, id: e.pointerId }
+            el.setAttribute('data-drag', '1')
+            try { el.setPointerCapture(e.pointerId) } catch (err) { }
+          },
+          onPointerMove: function (e) {
+            const d = pillDragRef.current
+            if (!d) return
+            const dx = e.clientX - d.x0
+            const dy = e.clientY - d.y0
+            if (!d.moved && Math.abs(dx) + Math.abs(dy) < 6) return
+            d.moved = true
+            pillMovedRef.current = true
+            const at = pillShift(e, d.x + dx, d.y + dy)
+            setPillPos(at)
+          },
+          onPointerUp: function (e) {
+            const d = pillDragRef.current
+            pillDragRef.current = null
+            const el = e && e.currentTarget
+            if (el && el.removeAttribute) el.removeAttribute('data-drag')
+            if (!d || !d.moved) return            // a tap: the click handler expands the card
+            const dx = e.clientX - d.x0
+            const dy = e.clientY - d.y0
+            const at = pillShift(e, d.x + dx, d.y + dy)
+            setPillPos(at)
+            writePillPos(at)
+          },
+          onPointerCancel: function (e) {
+            pillDragRef.current = null
+            if (e && e.currentTarget && e.currentTarget.removeAttribute) e.currentTarget.removeAttribute('data-drag')
+          },
+          // A drag must not also expand the card: the browser still fires a click after it.
+          onClick: function () { if (pillMovedRef.current) { pillMovedRef.current = false; return } setHidden(false) },
+          onDoubleClick: function (e) { e.stopPropagation() },
+        }, [
           h('span', { key: 'i' }, '\ud83d\udcdd'), h('span', { key: 't' }, '笔记'),
           selCount() > 0 ? h('span', { className: 'dn-pillcount', key: 'c' }, String(selCount())) : null,
         ])
@@ -4098,7 +4202,7 @@ return {
       const addPanel = (addFor || addBox) ? h('div', {
         className: 'dn-mcard dn-addlist', key: 'addlist', ref: addBoxRef,
         style: (function () {
-          const at = clampInCard({ x: (addFor || addBox).x, y: (addFor || addBox).y }, { w: 230, h: 120 })
+          const at = clampInCard({ x: (addFor || addBox).x, y: (addFor || addBox).y }, addSize || { w: 250, h: 130 })
           return { left: at.x + 'px', top: at.y + 'px' }
         })(),
         onPointerDown: function (e) { e.stopPropagation() },
