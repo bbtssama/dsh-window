@@ -71,7 +71,15 @@ function copyTree(src, dst, onlyNewer, skipDirs, skipFiles) {
     const rel = f.slice(srcKey.length).replace(/^\//, '')
     const segs = rel.split('/')
     const name = segs[segs.length - 1]
-    if (segs.slice(0, -1).some((s) => skipD.indexOf(s) >= 0)) continue
+    // `/XD` accepts a bare directory NAME (matches at any depth) or an ABSOLUTE path (excludes
+    // exactly that directory). The real robocopy honours both; a fake that only knew names would
+    // copy the exclusion targets and hide a regression in the path form the host now emits.
+    let skipped = false
+    for (let d = 0; d < segs.length - 1 && !skipped; d++) {
+      const abs = srcKey + '/' + segs.slice(0, d + 1).join('/')
+      if (skipD.indexOf(segs[d]) >= 0 || skipD.indexOf(abs) >= 0) skipped = true
+    }
+    if (skipped) continue
     if (skipF.indexOf(name) >= 0) continue
     const target = dstKey + f.slice(srcKey.length)
     if (onlyNewer && files.get(target) === files.get(f)) continue
@@ -156,11 +164,18 @@ const shell = {
     }
     const rm = /Remove-Item -LiteralPath "([^"]+)"/.exec(cmd)
     if (rm) { removeSubtree(rm[1]); return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } } }
+    // cmd /c rmdir /s /q "\\?\C:\…" — the long-path-capable tree removal the host uses instead of
+    // Remove-Item (measured: Remove-Item dies on a 274-character path, rmdir with the \\?\ prefix
+    // does not; and the production fs service has no rm of its own).
+    const rmdir = /^cmd \/c rmdir \/s \/q "(.*)"$/.exec(cmd)
+    if (rmdir) { removeSubtree(rmdir[1].replace(/^\\\\\?\\/, '')); return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } } }
     // robocopy "<src>" "<dst>" /E … [/XO] [/XD "…"] [/XF "…"] — the mirror's Windows command.
     const rc = /^robocopy "([^"]+)" "([^"]+)"(.*)$/.exec(cmd)
     if (rc) {
       const rest = rc[3]
-      const skipDirs = [...rest.matchAll(/\/XD "([^"]+)"/g)].map((m) => m[1])
+      // `/XD` paths arrive with native separators (robocopy ignores the forward-slash form) while
+      // this fake keys everything by forward slash, so normalize before matching.
+      const skipDirs = [...rest.matchAll(/\/XD "([^"]+)"/g)].map((m) => m[1].replace(/\\/g, '/'))
       const skipFiles = [...rest.matchAll(/\/XF "([^"]+)"/g)].map((m) => m[1])
       const copied = copyTree(rc[1], rc[2], /\s\/XO(\s|$)/.test(rest), skipDirs, skipFiles)
       copyStats.push({ cmd: 'robocopy', src: k(rc[1]), dst: k(rc[2]), copied, incremental: /\s\/XO(\s|$)/.test(rest) })
@@ -846,9 +861,20 @@ console.log('the asset mirror (folder import)')
   writeFile(srcDir + '/node_modules/junk.js', 'never copy me')
   writeFile(srcDir + '/.git/config', 'never copy me either')
   writeFile(srcDir + '/Thumbs.db', 'junk')
+  // A note space living inside the source: a workspace inside the imported folder, or the
+  // folder's own copy of one. Mirroring it copies the mirror into the mirror — measured on a real
+  // folder: 1203 of its mirror's 3542 entries (24.9 MB) were exactly that.
+  writeFile(srcDir + '/dsh-window/note/_assets/self/note.md', '# 自我副本\n')
+  writeFile(srcDir + '/dsh-window/note/_assets/self/img/self.png', 'SELFDATA')
+  // …while a plain `_assets` folder that is NOT a note space is ordinary content and must survive.
+  writeFile(srcDir + '/blog/_assets/logo.svg', '<svg/>')
 
   const scan = await r('scanFolder', { dir: srcDir })
   ok('scanning a folder lists its markdown files', scan.ok === true && scan.files.length === 2, JSON.stringify((scan.files || []).map((f) => f.name)))
+  // `FsDirEntry.size` is optional and the Windows backend leaves it undefined, so a listing that
+  // only reads it reports every file as 0 bytes. Ask for a real number here.
+  ok('the listing carries real byte sizes, not zeros',
+    (scan.files || []).every((f) => f.size > 0), JSON.stringify((scan.files || []).map((f) => f.name + ':' + f.size)))
   const rootId = scan.rootId
   ok('the asset root id is derived from the folder name + a path hash', typeof rootId === 'string' && /^docs-src-[0-9a-f]{8}$/.test(rootId), String(rootId))
 
@@ -856,11 +882,21 @@ console.log('the asset mirror (folder import)')
   ok('importing a folder mirrors it and creates one note per selected .md',
     imp.ok === true && imp.files >= 5 && (imp.created.match(/✓/g) || []).length === 2,
     JSON.stringify({ files: imp.files, bytes: imp.bytes, created: imp.created.split('\n').length }))
+  // The size guard (MIRROR_MAX_BYTES) and every "N 文件 / M KB" the reader sees are fed by this
+  // number. A blank `FsDirEntry.size` made it 0 for every folder in production (measured: a real
+  // 26 MB mirror recorded `bytes: 0` in _assets/index.json), so the guard could never fire.
+  ok('the mirror reports its real byte size (the guard and the human-readable size depend on it)',
+    imp.bytes > 0, 'bytes=' + imp.bytes)
   const mirrorDir = k(WS + '/dsh-window/note/_assets/' + rootId)
   ok('the mirror keeps the folder structure', isFile(mirrorDir + '/img/a.png') && isFile(mirrorDir + '/sub/deep/b.txt'), 'img/a.png + sub/deep/b.txt')
   ok('the mirror never copies node_modules, .git or OS junk',
     !isFile(mirrorDir + '/node_modules/junk.js') && !isFile(mirrorDir + '/.git/config') && !isFile(mirrorDir + '/Thumbs.db'),
     'exclusions applied')
+  ok('a note space inside the source is NOT mirrored (a mirror must not contain a mirror)',
+    !isFile(mirrorDir + '/dsh-window/note/_assets/self/note.md') && !isFile(mirrorDir + '/dsh-window/note/_assets/self/img/self.png'),
+    'nested asset area excluded')
+  ok('but an ordinary `_assets` folder that is not a note space is still mirrored',
+    isFile(mirrorDir + '/blog/_assets/logo.svg'), 'the rule is narrow: note/_assets only')
   ok('assets live under note/, next to the sessions', mirrorDir.indexOf(k(WS + '/dsh-window/note/_assets/')) === 0, k(WS + '/dsh-window/note/_assets/'))
   ok('ONE mirror is shared by every .md of that folder',
     ((await r('assets', {})).rootId === rootId) && isFile(WS + '/dsh-window/note/_assets/' + rootId + '/img/a.png'),
@@ -870,6 +906,9 @@ console.log('the asset mirror (folder import)')
   ok('the asset index records that root exactly once',
     (idx.roots || []).filter((x) => x.id === rootId).length === 1 && (idx.roots || []).filter((x) => x.id === rootId)[0].files >= 5,
     JSON.stringify((idx.roots || []).map((x) => x.id + ':' + x.files)))
+  ok('and the recorded size is a real number, so re-imports and the guard stay honest',
+    (idx.roots || []).filter((x) => x.id === rootId)[0].bytes > 0,
+    JSON.stringify((idx.roots || []).map((x) => x.id + ':' + x.bytes)))
   const reuse = await asTool('note_import_folder', { dir: srcDir, files: ['guide.md'] }, SID_AS)
   ok('importing the same folder again reuses the mirror instead of copying it again',
     reuse.ok === true && reuse.reused === true &&
@@ -916,6 +955,15 @@ console.log('the asset mirror (folder import)')
     sync2.refs.split('\n')[0])
   const resolvedNew = await r('asset', { path: './img/new.png' })
   ok('the newly mirrored image resolves for the card', resolvedNew.ok === true && resolvedNew.size > 0, JSON.stringify({ ok: resolvedNew.ok, hit: resolvedNew.hit }))
+  // A mirror that already holds a self-copy (what an earlier version left behind) must be cleaned
+  // by the next sync — stopping the copying is not enough when the junk is already on disk.
+  writeFile(WS + '/dsh-window/note/_assets/' + rootId + '/dsh-window/note/_assets/old/leftover.png', 'stale self-copy')
+  const sweep = await asTool('note_sync', { note: 'README' }, SID_AS)
+  ok('a re-sync deletes a nested mirror that is already inside the asset area',
+    sweep.ok === true && !isFile(WS + '/dsh-window/note/_assets/' + rootId + '/dsh-window/note/_assets/old/leftover.png'),
+    JSON.stringify({ ok: sweep.ok, files: sweep.files }))
+  ok('and it deletes it from the mirror only, never from the source',
+    isFile(srcDir + '/dsh-window/note/_assets/self/note.md'), 'the source copy is untouched')
   // Marks survive a sync: the text moved, so they are re-anchored, not dropped.
   const marked = await r('addSelection', { startLine: 1, startCol: 0, endLine: 1, endCol: 5 })
   const sync3 = await asTool('note_sync', { note: 'README' }, SID_AS)
@@ -940,6 +988,15 @@ console.log('the asset mirror (folder import)')
   ok('note_assets reports the root, the origin and the size',
     info.ok === true && info.assetRoot === '_assets/' + rootId && info.files >= 5 && String(info.origin).indexOf('docs-src') > 0,
     JSON.stringify({ root: info.assetRoot, files: info.files, origin: info.origin }))
+
+  // ── a mistyped folder: say what the reader probably meant ──────────────────────
+  writeFile(WS + '/docs-src-2/linux学习一站式笔记/x.md', 'x')
+  const wrong = await r('scanFolder', { dir: WS + '/docs-src-2/linux学习' })
+  ok('a mistyped folder is reported as unreadable', wrong.ok === false, String(wrong.error).slice(0, 60))
+  ok('and the answer suggests the folder the reader meant',
+    wrong.suggestions !== null && wrong.suggestions !== undefined && Array.isArray(wrong.suggestions.dirs) && wrong.suggestions.dirs.indexOf('linux学习一站式笔记') >= 0,
+    JSON.stringify(wrong.suggestions && wrong.suggestions.dirs))
+
   // ── following a link into the mirror ────────────────────────────────────────────
   // `[附录](./sub/notes.md)` must open that document as a note SHARING the same asset root, so a
   // mirrored folder reads as a whole instead of bouncing the browser to a missing path.
