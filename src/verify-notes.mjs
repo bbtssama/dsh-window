@@ -324,9 +324,15 @@ const c1 = await asTool('note_create', { name: '会议纪要' }, SID_A)
 ok('note_create makes a note directory under the session subtree',
   c1 && c1.ok === true && files.has(k(noteDirOf(SID_A, '会议纪要') + '/note.md')), JSON.stringify(c1 && { ok: c1.ok, dir: c1.dir }))
 ok('a new note is opened automatically', c1 && c1.active === '会议纪要', JSON.stringify(c1 && c1.active))
-ok('and a git repository is initialised for it',
+// A note keeps its OWN repository, but it is created the first time the note needs history — not
+// when the note is created. Importing a 156-document folder used to spawn 6–8 git processes per
+// note, which is what made the whole machine unusable during an import.
+ok('a fresh note has no repository yet (nothing has needed history)',
+  !isDir(noteDirOf(SID_A, '会议纪要') + '/.git'), 'no .git before the first commit')
+await asTool('note_commit', { message: 'note: 第一次提交' }, SID_A)
+ok('and it gets its own repository the first time it needs one, in its own directory',
   isDir(noteDirOf(SID_A, '会议纪要') + '/.git') && gitCalls.some((c) => c.args === 'init -q' && c.dir === noteDirOf(SID_A, '会议纪要')),
-  'git init in ' + noteDirOf(SID_A, '会议纪要'))
+  'its own git init: ' + noteDirOf(SID_A, '会议纪要'))
 const c2 = await asTool('note_create', { name: '读书笔记', text: '第一章\n要点甲\n' }, SID_A)
 ok('a second note can be created from text', c2 && c2.ok === true && /要点甲/.test(files.get(k(noteDirOf(SID_A, '读书笔记') + '/note.md'))), JSON.stringify(c2 && c2.ok))
 const listed = await asTool('note_list', {}, SID_A)
@@ -1089,7 +1095,10 @@ console.log('the asset mirror (folder import)')
     linkedMeta.assetRoot === '_assets/' + rootId, JSON.stringify(linkedMeta))
   ok('the followed note\u2019s origin points back at the source folder, not the mirror',
     String(linkedMeta.origin) === srcDir + '/sub/notes.md', String(linkedMeta.origin))
-  ok('the followed note has its own repository',
+  // Its own repository — created when the note first needs history, and never shared with another
+  // note (the deferral is about TIMING, not about the one-repo-per-note layout).
+  await r('commit', { message: 'note: followed' })
+  ok('the followed note has its own repository once it needs one',
     gitCalls.some((c) => c.dir === k(WS + '/dsh-window/note/' + SID_AS + '/notes')), 'git init ran for it')
   // Following it again from the SAME document (the root README) must reuse the note, not make a
   // second one. (Following it from inside 《notes》 itself would mean `sub/sub/notes.md`, since a
@@ -1134,6 +1143,32 @@ console.log('the cost of polling a session with many notes')
   const warmGit = gitCalls.length - warmStart
   ok('a warm poll spawns no git command at all (12 notes → it used to be one per note)',
     warmGit === 0, warmGit + ' git calls across two polls')
+  // The import itself must not touch git either: a real 156-document import used to run (init + 2
+  // configs + add + commit + verify + rev-parse) per note — over a thousand process launches inside
+  // one lock, which is what made the whole machine unusable while it ran.
+  const bulkSrc = WS + '/bulk-src'
+  writeFile(bulkSrc + '/甲.md', '# 甲\n\n内容\n')
+  writeFile(bulkSrc + '/乙.md', '# 乙\n\n内容\n')
+  writeFile(bulkSrc + '/sub/丙.md', '# 丙\n\n内容\n')
+  const gitBeforeImport = gitCalls.length
+  const bulk = await asTool('note_import_folder', { dir: bulkSrc, files: ['甲.md', '乙.md', 'sub/丙.md'] }, SID_P)
+  const importGit = gitCalls.length - gitBeforeImport
+  ok('importing documents launches ZERO git processes (' + bulk.created.split('\n').length + ' notes)',
+    bulk.ok === true && importGit === 0, importGit + ' git calls during the import')
+  ok('and none of those notes has a repository yet — they get one when it is first needed',
+    !isDir(k(WS + '/dsh-window/note/' + SID_P + '/丙/.git')), 'no .git before the first commit')
+  // …and the commit hash is read straight out of .git, with no `git rev-parse` per note. A brand-new
+  // note (never listed, so nothing is cached) proves the read path itself.
+  const hashNote = k(WS + '/dsh-window/note/' + SID_P + '/哈希测试')
+  writeFile(hashNote + '/note.md', '# 哈希测试\n')
+  writeFile(hashNote + '/.git/HEAD', 'ref: refs/heads/master\n')
+  writeFile(hashNote + '/.git/refs/heads/master', 'abcdef0123456789abcdef0123456789abcdef01\n')
+  const gitBeforeHash = gitCalls.length
+  const listed = await r('state', { revision: -1 })
+  const row = (listed.notes || []).filter((n) => n.name === '哈希测试')[0]
+  ok('the list reads the commit hash out of .git itself, launching no git at all',
+    row && row.commitHash === 'abcdef0' && gitCalls.length === gitBeforeHash,
+    JSON.stringify({ hash: row && row.commitHash, gitCalls: gitCalls.length - gitBeforeHash }))
   const rows = warmState.notes || []
   ok('and the list still carries every note with its size and its head',
     rows.length === 12 && rows.every((n) => n.lines >= 1 && n.bytes > 0), JSON.stringify(rows.slice(0, 2)))
