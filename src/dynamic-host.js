@@ -275,6 +275,15 @@ return {
     // marks, each entry pointing at (note, markId), and it lives in the session state so it
     // survives a reload and is visible to the agent as data rather than as a UI accident.
     let lists = []
+    // ── fine-grained change events (per session) ─────────────────────────────────────
+    // Every tool and RPC that mutates something appends a topic here, and the card reads them on
+    // its (now much faster, when visible) state poll. A topic says WHICH part of the UI went
+    // stale, so the card refreshes that part instead of guessing from a revision counter:
+    //   text  note content        marks  marks of the active note   notes  the note list
+    //   lists custom mark lists   view   a requested reading position  git  commit state
+    //   ui    a queued view command (note_ui / note_panel)
+    let events = []
+    let eventSeq = 0
     // ── UI commands (per session) ────────────────────────────────────────────────────
     // The card owns its own view state (which tab, whether the list is floating, the
     // click-to-summon switch), all of it in browser localStorage that the host cannot touch.
@@ -300,7 +309,7 @@ return {
         sid: sid, base: '', baseFrom: '', confirmed: false, pathCache: null, loadedBase: '',
         policyCache: null, sessionId: sid, stateCorrupt: false,
         activeNote: '', sessionNotes: null, summoned: false, uiRev: 0,
-        lists: [], uiQueue: [], uiSeq: 0,
+        lists: [], uiQueue: [], uiSeq: 0, events: [], eventSeq: 0,
         S: freshState(), diskVersions: new Map(), loading: null,
       }
     }
@@ -313,6 +322,7 @@ return {
       st.activeNote = activeNote; st.sessionNotes = sessionNotes
       st.summoned = summoned; st.uiRev = uiRev
       st.lists = lists; st.uiQueue = uiQueue; st.uiSeq = uiSeq
+      st.events = events; st.eventSeq = eventSeq
       st.S = S; st.diskVersions = diskVersions; st.loading = loading
     }
     function activate(sid) {
@@ -328,6 +338,8 @@ return {
       lists = Array.isArray(st.lists) ? st.lists : []
       uiQueue = Array.isArray(st.uiQueue) ? st.uiQueue : []
       uiSeq = intOr(st.uiSeq, 0)
+      events = Array.isArray(st.events) ? st.events : []
+      eventSeq = intOr(st.eventSeq, 0)
       S = st.S; diskVersions = st.diskVersions; loading = st.loading
       currentStore = st
       return st
@@ -687,6 +699,10 @@ return {
       S.revision += 1
       await writeSessionState()
       await load()
+      // The card is showing a different note now: announce both dimensions, so it refreshes the
+      // picker and the body without waiting for the next poll.
+      emit('notes', { active: activeNote })
+      emit('text', { revision: S.revision, active: activeNote })
       return { ok: true, active: activeNote }
     }
     /** Create a directory by writing into it    /** Create a directory by writing into it: the abstract fs service has no mkdir. */
@@ -795,6 +811,9 @@ return {
         try { const rawBad = await readIfExists(paths().state); if (rawBad !== null) await writeAt(paths().bad, String(rawBad)) } catch (err) { }
         stateCorrupt = false
       }
+      // One place announces mark changes: every tool and RPC that touches the marks goes through
+      // this function, so each change is announced exactly once (see emit).
+      emit('marks', { revision: S.revision })
       const payload = { v: STATE_VERSION, seq: S.seq, selections: S.selections, updatedAt: isoNow() }
       await writeAt(paths().state, JSON.stringify(payload, null, 2) + '\n')
     }
@@ -826,7 +845,10 @@ return {
       const jump = a.jump === true
       const prevJump = S.view && typeof S.view.jump === 'number' ? S.view.jump : 0
       S.view = { line: line, anchor: anchor, updatedAt: isoNow(), jump: jump ? prevJump + 1 : prevJump }
-      if (jump) uiRev += 1
+      // An announcement, not a plain scroll save: only a JUMP asks the card to move (note_goto),
+      // while the periodic scroll save must stay silent or the reader would be dragged back to
+      // wherever the last save happened to land.
+      if (jump) { uiRev += 1; emit('view', { line: line, anchor: anchor, jump: S.view.jump }) }
       if (fs === undefined || !canWrite() || !activeNote) return { ok: true, line: line }
       await ensureViewIgnored()
       const payload = { v: 1, line: line, anchor: anchor, updatedAt: S.view.updatedAt }
@@ -845,7 +867,7 @@ return {
       }
       return out
     }
-    function stateView(callerId) {
+    function stateView(callerId, callerSince) {
       // A store that is not bound to a session has nothing to report: the session id is
       // the note-space path segment, so without one there is no note space to describe.
       // (Cross-session visibility needs no branch here any more: each session has its own
@@ -902,6 +924,11 @@ return {
         // perform them. Both ride the poll the card already makes every two seconds.
         lists: viewLists(),
         ui: uiQueue,
+        // Fine-grained change events newer than the client's `since`. They ride the poll the card
+        // already makes, so no second channel is introduced, and they arrive even when the note
+        // revision is unchanged ("unchanged" is only sent when neither events nor revisions moved).
+        events: eventsSince(callerSince),
+        eventId: eventSeq,
         error: S.error,
       }
     }
@@ -1068,6 +1095,7 @@ return {
       if (lists.length >= MAX_LISTS) return { ok: false, error: '最多 ' + MAX_LISTS + ' 个列表' }
       lists = lists.concat([{ id: 'list-' + (lists.length + 1) + '-' + Date.now().toString(36), name: clean, items: [] }])
       await writeSessionState()
+      emit('lists', { name: clean, lists: viewLists() })
       return { ok: true, name: clean, lists: viewLists() }
     }
     async function listRename(from, to) {
@@ -1079,6 +1107,7 @@ return {
       if (other !== null && other !== l) return { ok: false, error: '已经有同名列表：《' + clean + '》' }
       l.name = clean
       await writeSessionState()
+      emit('lists', { name: clean, renamedFrom: String(from), lists: viewLists() })
       return { ok: true, from: String(from), name: clean, lists: viewLists() }
     }
     async function listDelete(name) {
@@ -1086,6 +1115,7 @@ return {
       if (l === null) return { ok: false, error: '没有名为《' + String(name) + '》的列表' }
       lists = lists.filter(function (x) { return x !== l })
       await writeSessionState()
+      emit('lists', { name: l.name, deleted: true })
       return { ok: true, removed: l.items.length, lists: viewLists() }
     }
     async function listAdd(name, note, markId) {
@@ -1101,6 +1131,7 @@ return {
       if (l.items.length >= MAX_LIST_ITEMS) return { ok: false, error: '一个列表最多 ' + MAX_LIST_ITEMS + ' 条' }
       l.items = l.items.concat([{ note: target, markId: id, addedAt: isoNow() }])
       await writeSessionState()
+      emit('lists', { name: l.name, count: l.items.length, markId: id, note: target })
       return { ok: true, added: true, name: l.name, count: l.items.length, lists: viewLists() }
     }
     async function listRemove(name, note, markId) {
@@ -1111,8 +1142,34 @@ return {
       const before = l.items.length
       l.items = l.items.filter(function (it) { return !(it.note === target && it.markId === id) })
       const removed = l.items.length !== before
-      if (removed) await writeSessionState()
+      if (removed) { await writeSessionState(); emit('lists', { name: l.name, count: l.items.length, removedId: id, note: target }) }
       return { ok: true, removed: removed, name: l.name, count: l.items.length, lists: viewLists() }
+    }
+    // ── fine-grained change events ───────────────────────────────────────────────────
+    const EVENT_TOPICS = { text: 1, marks: 1, notes: 1, lists: 1, view: 1, git: 1, ui: 1 }
+    const MAX_EVENTS = 200
+    /**
+     * Announce that one part of the reader's view went stale. Called from the same helpers the
+     * tools and the RPCs share, so a change is announced exactly once no matter who made it.
+     * `data` carries just enough for the card to act without another round trip (a requested
+     * reading position, a renamed note, the list name that changed).
+     */
+    function emit(topic, data) {
+      if (!EVENT_TOPICS[topic]) return
+      eventSeq += 1
+      const entry = { id: eventSeq, topic: topic, at: isoNow() }
+      if (data && typeof data === 'object') entry.data = data
+      events = events.concat([entry])
+      if (events.length > MAX_EVENTS) events = events.slice(events.length - MAX_EVENTS)
+      uiRev += 1
+      return entry.id
+    }
+    /** The events a client that has seen `since` has not seen yet. */
+    function eventsSince(since) {
+      const from = intOr(since, 0)
+      const out = []
+      for (let i = 0; i < events.length; i++) if (intOr(events[i] && events[i].id, 0) > from) out.push(events[i])
+      return out.slice(-60)
     }
     // ── UI commands the card performs on its next poll ───────────────────────────────
     function pushUi(cmd) {
@@ -1120,6 +1177,7 @@ return {
       const entry = { id: uiSeq, cmd: cmd, at: isoNow() }
       uiQueue = uiQueue.concat([entry]).slice(-20)
       uiRev += 1
+      emit('ui', { id: entry.id, kind: cmd && cmd.kind ? String(cmd.kind) : '' })
       return { ok: true, id: entry.id, uiRevision: uiRev, queued: uiQueue.length }
     }
     function ackUi(id) {
@@ -1146,6 +1204,7 @@ return {
       const rev = await runGit('rev-parse --short HEAD')
       S.commitHash = rev.ok ? rev.out : ''
       S.committedAt = isoNow()
+      emit('git', { hash: S.commitHash })
       return { ok: true, hash: S.commitHash, message: msg }
     }
     function selRender(list) {
@@ -1256,6 +1315,7 @@ return {
           try { await commit('note: 新建 ' + name + (kind === 'empty' ? '' : '（来自' + kind + '）')) } catch (err) { }
         }
       } else sessionNotes = null
+      emit('notes', { active: activeNote, created: name })
       return { ok: true, name: name, active: activeNote, source: kind, lineCount: linesOf(content).length, dir: dir }
     }
     /** Clear the active note's body, keeping its git history (a commit records it). */
@@ -1275,6 +1335,8 @@ return {
         try { await persistState() } catch (err) { }
         try { await commit('note: 清空 ' + name + '（保留历史）') } catch (err) { }
       } else { S.text = next; S.selections = []; S.revision += 1 }
+      emit('text', { revision: S.revision, active: activeNote })
+      emit('notes', { active: activeNote })
       return { ok: true, name: name, clearedLines: lines, keptHistory: true }
     }
     /** Delete a note entirely — its directory, its state file and its git repository. */
@@ -1294,6 +1356,7 @@ return {
         await writeSessionState()
         await load()
       }
+      emit('notes', { active: activeNote, deleted: clean })
       return { ok: true, deleted: clean, remaining: left, active: activeNote }
     }
     /** Rename a note's directory (its git history moves with it). */
@@ -1312,6 +1375,7 @@ return {
         await writeSessionState()
         await load()
       }
+      emit('notes', { active: activeNote, from: a, to: b })
       return { ok: true, from: a, to: b, active: activeNote }
     }
     /** Import text/file/upload into the ACTIVE note (append or replace). */
@@ -1334,6 +1398,7 @@ return {
       const r = await saveText(next, undefined)
       if (!r || r.ok !== true) return { ok: false, error: (r && r.error) || '写入失败' }
       if (canWrite()) { try { await commit('note: 导入到 ' + activeNote + '（' + kind + '）') } catch (err) { } }
+      emit('text', { revision: S.revision, active: activeNote, source: kind })
       return { ok: true, name: activeNote, mode: mode, source: kind, lineCount: linesOf(next).length }
     }
     /** Remove a directory tree (note_delete). Prefers the fs service, falls back to shell. */
@@ -1811,10 +1876,17 @@ return {
       // 出来，只有换一个笔记再换回来才行". So the client echoes the note it is displaying, and a
       // mismatch forces a full answer.
       const noteArg = args && typeof args.note === 'string' ? args.note : null
-      if (rev === S.revision && uiArg === uiRev && noteArg === activeNote) return { unchanged: true, revision: S.revision, uiRevision: uiRev, active: activeNote }
+      const sinceArg = args && typeof args.since === 'number' ? args.since : 0
+      const fresh = eventsSince(sinceArg)
+      // "unchanged" only when the revisions match AND nothing happened since the client's last
+      // event id: otherwise a fine-grained event (a rename, a mark, a reading position) would be
+      // swallowed by the cheap answer.
+      if (rev === S.revision && uiArg === uiRev && noteArg === activeNote && fresh.length === 0) {
+        return { unchanged: true, revision: S.revision, uiRevision: uiRev, active: activeNote, eventId: eventSeq }
+      }
       // The panel needs full note rows (name, lines, commit), not just the names the
       // store keeps for itself — merging a name list over them rendered "undefined".
-      const v = stateView(callerId)
+      const v = stateView(callerId, sinceArg)
       v.notes = await notesView()
       v.active = activeNote
       return v
@@ -2123,6 +2195,7 @@ return {
               '- 样式是**两个独立开关**：`note_set_style({id, italic:true})` 只改斜体、`underline:true` 只改下划线，两者可以同时开，并且**和任何颜色叠加**（例如绿底+斜体+下划线）。它们直接改文字本身、不抢注意力。新建时也能一起给：`note_add_selection({…, color:"pink", italic:true, underline:true})`。',
               '- 自定义标记列表：`note_lists`（action = list/create/rename/delete/add/remove）能把任意笔记里的任意标记收进一个命名列表（例如"面试要背的"），写的是同一份会话数据，用户在卡片里点的「添加到」也是它。',
               '- 卡片界面也能由你驱动：`note_ui`（open/close/tab/float/dock/summon/focus/card/refresh —— 打开或关闭标记列表、切视图、拖出成独立小窗、改"点标记→列表"开关、把列表定位到某条标记、直接把功能卡弹在某条标记上）、`note_panel`（start/stop/collapse/expand/width）、`note_goto`（给 line 或 markId 跳转）。命令会排队并在卡片下一次轮询时执行。',
+              '- 你每调用一次写工具，卡片都会收到一条**带主题的事件**并只刷新受影响的那一块：正文（text）/ 标记（marks）/ 笔记列表（notes）/ 自定义列表（lists）/ 阅读位置（view）/ git（git）/ 界面命令（ui）。卡片在可见时约 0.7 秒轮询一次，所以你的改动几乎是立刻出现在用户眼前 —— 不需要让用户手动刷新，也不要用"刷新页面"来敷衍。',
             ].join('\n'),
           })
         })
@@ -2189,6 +2262,9 @@ return {
       if (!canWrite()) return true
       try { await writeAt(paths().note, S.text); S.fileExists = true; S.savedAt = isoNow() }
       catch (err) { fail('写入笔记', err); return false }
+      // The note text changed: one announcement for every write path (patch, write, import,
+      // clear, reload), because they all flush through here.
+      emit('text', { revision: S.revision })
       try { await persistState() } catch (err) { fail('写入选中记录', err) }
       return true
     }

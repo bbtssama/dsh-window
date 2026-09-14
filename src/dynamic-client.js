@@ -1120,6 +1120,8 @@ return {
       // 250px panel anchored near the right edge was cut off by the card's border.
       const [addSize, setAddSize] = React.useState(null)
       const uiAckRef = React.useRef(0)
+      // The last fine-grained event this card has processed (see applyEvents).
+      const eventIdRef = React.useRef(0)
       // The italic/underline run table (see styleRunsFor): declared here because the component
       // bails out early for the collapsed pill, and no hook may run past that point.
       const styleRunsRef = React.useRef({ key: '', byLine: {} })
@@ -1338,8 +1340,51 @@ return {
       // attach after that render, so without this the saved highlights of a
       // freshly loaded note stayed invisible until some later geometry change.
       React.useEffect(function () { bump() }, [geo.width, geo.mode, panel, hidden, mode, bounds.w, bounds.h, st ? st.revision : -1])
+      /**
+       * The fine-grained change events the host appends for every mutating tool/RPC.
+       *
+       * They are what tells the card WHICH part of the view went stale, right after the tool
+       * call rather than up to a poll later:
+       *   text   the note body (and, if `active` is given, that we are looking at another note)
+       *   marks  the marks of the active note (tints, list rows)
+       *   notes  the note picker
+       *   lists  the custom mark lists (and the view tabs that show them)
+       *   view   a requested reading position (note_goto) — the card must actually move
+       *   git    the commit hash in the footer
+       *   ui     a queued view command (note_ui / note_panel) — already handled by its own effect
+       * Anything not listed here simply means "the full state answer already covers it".
+       */
+      function applyEvents(list) {
+        let last = eventIdRef.current
+        for (let i = 0; i < list.length; i++) {
+          const e = list[i]
+          if (!e || typeof e.id !== 'number') continue
+          if (e.id <= last) continue
+          last = e.id
+          const data = e.data && typeof e.data === 'object' ? e.data : {}
+          if (e.topic === 'view') {
+            // The same channel the reader's own jumps use, so the restore path is the one that
+            // already knows how to re-anchor a line whose text moved.
+            const line = typeof data.line === 'number' ? data.line : 0
+            if (line > 0) { pendingViewRef.current = { line: line, anchor: typeof data.anchor === 'string' ? data.anchor : '', tries: 0 }; bump() }
+          } else if (e.topic === 'lists') {
+            // The payload carries the new list set; the answer's `lists` does too, but taking it
+            // here means a list change shows up without waiting for the next full answer.
+            if (Array.isArray(data.lists)) setListData(data.lists)
+          } else if (e.topic === 'marks') {
+            bump()
+          }
+        }
+        eventIdRef.current = last
+      }
       function applyState(r) {
-        if (!r || r.unchanged) return
+        if (!r || r.unchanged) {
+          // Even an "unchanged" answer can carry events (they are what makes the answer not
+          // unchanged), so they are processed before anything else.
+          if (r && Array.isArray(r.events)) applyEvents(r.events)
+          return
+        }
+        if (Array.isArray(r.events)) applyEvents(r.events)
         // Custom mark lists ride every state poll, so the tabs and their counts stay in step
         // with whatever the agent (note_lists) or another window did to them.
         if (Array.isArray(r.lists)) setListData(r.lists)
@@ -1402,6 +1447,18 @@ return {
       React.useEffect(function () {
         let alive = true
         let tickCount = 0
+        let timer = 0
+        // How soon the poll comes back. The card learns about the agent's edits from the events
+        // that ride this poll, so the interval decides how "instant" a tool call feels: 700ms
+        // while the card is visible and the tab has focus, 2.6s when it is not (a hidden tab
+        // gains nothing from being current, and a phone should not pay for it).
+        const pollDelay = function () {
+          try {
+            if (document.visibilityState !== 'visible') return 2600
+            if (typeof document.hasFocus === 'function' && !document.hasFocus()) return 1400
+          } catch (err) { }
+          return 700
+        }
         const tick = function () {
           tickCount += 1
           // Two revisions matter: the note text, and the host's non-content state (the summon
@@ -1413,7 +1470,13 @@ return {
           // relaxations disappear.
           const hiddenNow = !(notesRef.current.length > 0) && !(stRef.current && stRef.current.summoned === true)
           const force = hiddenNow || (!hostUiRevRef.current && tickCount % 8 === 0)
-          host.call('state', { revision: force ? -1 : revRef.current, uiRevision: uiRevRef.current, note: shownNoteRef.current, sessionId: sidRef.current }).then(function (r) {
+          host.call('state', {
+            revision: force ? -1 : revRef.current,
+            uiRevision: uiRevRef.current,
+            note: shownNoteRef.current,
+            since: eventIdRef.current,
+            sessionId: sidRef.current,
+          }).then(function (r) {
             if (!alive) return
             setOffline(false)
             if (r && r.inactive) {
@@ -1427,11 +1490,17 @@ return {
             applyState(r)
           }).catch(function () { if (alive) setOffline(true) })
         }
-        tick()
-        const stop = ctx.interval(tick, 2000)
+        // A self-scheduling chain instead of ctx.interval: the delay depends on whether the card
+        // is actually being looked at (see pollDelay).
+        const loop = function () {
+          if (!alive) return
+          tick()
+          timer = ctx.timeout(loop, pollDelay())
+        }
+        loop()
         return function () {
           alive = false
-          stop()
+          if (timer) { try { timer() } catch (err) { } timer = 0 }
           if (retryRef.current) { try { window.clearTimeout(retryRef.current) } catch (err) { } retryRef.current = 0 }
         }
       }, [])
@@ -2504,13 +2573,29 @@ return {
         }
         return out
       }
+      /**
+       * Re-read the note from disk (after the agent, or an editor, changed it).
+       *
+       * The reader must stay where they were reading: the line AND the text of that line are
+       * captured before the reload and handed to the same restore path a note switch uses, so a
+       * small drift (the agent inserted a paragraph above) is re-anchored by text instead of
+       * dropping the reader at the top.
+       */
       function doReload() {
+        const fromLine = topVisibleLine()
+        const keepLine = Math.max(1, fromLine || 1)
+        const keepAnchor = fromLine ? anchorOfLine(fromLine) : ''
+        const keepTop = bodyRef.current ? bodyRef.current.scrollTop : 0
         host.call('reload', {}).then(function (r) {
           if (r && r.ok) {
             revRef.current = r.revision; textRef.current = r.text
             setSt(r); draftRef.current = r.text; setDraft(r.text)
-            bump(); setDirty(false); dirtyRef.current = false
-            notify('已重载磁盘内容')
+            setDirty(false); dirtyRef.current = false
+            // The text is new but the position is the old one: queue it as a pending view and let
+            // the measuring pass place it (it clamps, and re-anchors by the line's text).
+            pendingViewRef.current = { line: keepLine, anchor: keepAnchor, tries: 0, top: keepTop }
+            bump()
+            notify('已重载磁盘内容（保持在第 ' + keepLine + ' 行附近）')
           } else notify('重载失败')
         }).catch(function (err) { notify('重载失败: ' + err.message) })
       }
@@ -2629,9 +2714,17 @@ return {
         }
         if (top === null) {
           // Not measured yet (the blocks render before the bands exist). Give the geometry
-          // a few more chances as it bumps, then give up rather than fight the reader.
+          // a few more chances as it bumps, then give up rather than fight the reader — but a
+          // reload knows the pixel offset it was at, so that is used as the last resort instead
+          // of leaving the reader at the top.
           p.tries = (p.tries || 0) + 1
-          if (p.tries > 12) pendingViewRef.current = null
+          if (p.tries > 12) {
+            pendingViewRef.current = null
+            if (typeof p.top === 'number' && isFinite(p.top)) {
+              host.scrollTop = Math.max(0, p.top)
+              viewSavedRef.current = { line: line, note: String(noteNameRef.current || '') }
+            }
+          }
           return
         }
         pendingViewRef.current = null

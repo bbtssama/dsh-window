@@ -154,6 +154,25 @@ dsh plugin --profile <profile> add dsh-window
 
 ---
 
+## 细粒度刷新通知
+
+卡片不需要等定时轮询去"猜"哪里变了。**每一个会改数据的工具/RPC 都会追加一条带主题的事件**，卡片在下一次轮询里读到它，并且**只刷新那一条主题对应的部分**：
+
+| 主题 | 由谁产生 | 卡片刷新什么 |
+| --- | --- | --- |
+| `text` | `note_write` `note_patch` `note_patch_many` `note_import` `note_clear` `note_open`（以及卡片自己的编辑落盘） | 正文（阅读位置保持不变） |
+| `marks` | 任何改标记的调用（`addSelection` / `note_set_color` / `note_set_style` / `note_set_remark` / 删除 / 清空 / 取用） | 标记底色与斜体下划线、标记列表行 |
+| `notes` | 新建 / 重命名 / 删除 / 切换笔记 | 笔记选择器 |
+| `lists` | `note_lists` 与卡片上的「添加到 / 移出 / 新建 / 删除」 | 自定义列表与视图入口 |
+| `view` | `note_goto`（以及任何带 `jump` 的阅读位置请求） | 卡片真的滚到那一行（按行文本重新锚定） |
+| `git` | `note_commit` / `note_checkpoint` | 底栏的 commit 号 |
+| `ui` | `note_ui` / `note_panel` 的命令 | 执行那条界面命令（按 id 回执，不重复执行） |
+
+事件**搭在已有的 state 轮询上**返回（不新开通道），并且**不会被 `unchanged` 短路**：只有当"两个 revision 都没变**且**没有新事件"时，host 才回那个最省流量的答复。
+卡片可见且有焦点时轮询间隔 **0.7s**，切到后台 2.6s，所以 agent 的一次 `note_patch` 几乎是立刻出现在眼前。
+
+---
+
 ## 设计要点
 
 **两半结构**：host 半边跑在 DSH 进程里（工具、HTTP 路由、文件与 git）；client 半边是浏览器里的 React 卡片，

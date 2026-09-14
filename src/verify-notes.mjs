@@ -729,5 +729,47 @@ console.log('mark styles (colour, italic, underline — independent, all combina
     rendered.indexOf('·斜体') >= 0 && rendered.indexOf('·下划线') >= 0, rendered.split('\n').slice(0, 3).join(' | '))
 }
 
+console.log('fine-grained change events')
+// Every mutating tool/RPC appends a topic, and the card refreshes only the part that topic names.
+// The events ride the state poll, so they must survive the "unchanged" shortcut.
+{
+  const SID_EV = 'session-events-7777'
+  sessions._m.set(SID_EV, sessionWith(SID_EV, WS))
+  const r = async (m, a) => (await rpc(m, Object.assign({ sessionId: SID_EV }, a || {}))).result || {}
+  await r('createNote', { name: '事件', text: '# 事件\n第一行\n第二行\n' })
+  const base = await r('state', { revision: -1, since: 0 })
+  const baseId = base.eventId
+  ok('the state answer carries an event id', typeof baseId === 'number' && baseId > 0, String(baseId))
+  await r('addSelection', { startLine: 2, startCol: 0, endLine: 2, endCol: 3 })
+  const afterMark = await r('state', { revision: -1, since: baseId })
+  const markTopics = (afterMark.events || []).map((e) => e.topic)
+  ok('adding a mark announces the marks topic', markTopics.indexOf('marks') >= 0, JSON.stringify(markTopics))
+  const sinceMark = afterMark.eventId
+  await r('listCreate', { name: '事件列表' })
+  const afterList = await r('state', { revision: -1, since: sinceMark })
+  ok('creating a custom list announces the lists topic',
+    (afterList.events || []).some((e) => e.topic === 'lists'), JSON.stringify((afterList.events || []).map((e) => e.topic)))
+  const listId = afterList.eventId
+  await r('saveView', { line: 3, anchor: '第三行', jump: true })
+  const afterView = await r('state', { revision: -1, since: listId })
+  const viewEv = (afterView.events || []).filter((e) => e.topic === 'view')[0]
+  ok('a jump announces the view topic with its line',
+    viewEv !== undefined && viewEv.data && viewEv.data.line === 3,
+    JSON.stringify(viewEv && viewEv.data))
+  const viewId = afterView.eventId
+  const patched = await asTool('note_patch', { startLine: 2, startCol: 0, endLine: 2, endCol: 3, text: '第一行改' }, SID_EV)
+  ok('note_patch succeeded', patched.ok === true, JSON.stringify({ ok: patched.ok }))
+  const afterText = await r('state', { revision: -1, since: viewId })
+  ok('a text write announces the text topic',
+    (afterText.events || []).some((e) => e.topic === 'text'), JSON.stringify((afterText.events || []).map((e) => e.topic)))
+  const quiet = await r('state', { revision: afterText.revision, uiRevision: afterText.uiRevision, note: afterText.active, since: afterText.eventId })
+  ok('nothing new is answered as unchanged, with the current event id',
+    quiet.unchanged === true && quiet.eventId === afterText.eventId, JSON.stringify({ unchanged: quiet.unchanged, eventId: quiet.eventId }))
+  const behind = await r('state', { revision: afterText.revision, uiRevision: afterText.uiRevision, note: afterText.active, since: 0 })
+  ok('a client that missed events is not told "unchanged"',
+    behind.unchanged !== true && Array.isArray(behind.events) && behind.events.length > 0,
+    JSON.stringify({ unchanged: behind.unchanged, n: (behind.events || []).length }))
+}
+
 console.log(failed === 0 ? '\nALL NOTE-MODEL CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')
 process.exit(failed === 0 ? 0 : 1)
