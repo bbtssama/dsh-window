@@ -3249,7 +3249,7 @@ return {
         const cand = candidates[i]
         if (cand === '' || !/\.(md|markdown)$/i.test(cand)) continue
         const probe = mirrorPrefix + rootId + '/' + cand
-        if (probe.indexOf(mirrorPrefix) !== 0) continue
+        if (probe.replace(/\\/g, '/').indexOf(mirrorPrefix.replace(/\\/g, '/')) !== 0) continue
         try {
           const raw = await readIfExists(probe)
           if (raw !== null) { rel = cand; text = String(raw).replace(/\r\n?/g, '\n') }
