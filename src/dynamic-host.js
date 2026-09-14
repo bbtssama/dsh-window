@@ -2967,24 +2967,44 @@ return {
         const lines = []
         let made = 0
         let existing = 0
+        let firstFail = ''
         for (let i = 0; i < files.length; i++) {
           const raw = String(files[i])
           const fileName = raw.split(/[\\/]/).pop()
           const noteName = sanitizeNoteName(fileName.replace(/\.(md|markdown)$/i, ''))
-          if (!noteName) { lines.push('  ✗ ' + raw + ' —— 名字不合法'); continue }
-          let text = ''
-          try {
-            const source = await readIfExists(dir.replace(/\/+$/, '') + '/' + raw)
-            if (source === null) { lines.push('  ✗ ' + raw + ' —— 读不到源文件'); continue }
-            text = String(source).replace(/\r\n?/g, '\n')
-          } catch (err) { lines.push('  ✗ ' + raw + ' —— ' + ((err && err.message) || String(err))); continue }
+          if (!noteName) { lines.push('  ✗ ' + raw + ' —— 名字不合法'); if (!firstFail) firstFail = raw + '：名字不合法'; continue }
+          // Read the source with its REAL reason visible: readIfExists() swallows the error, and
+          // "读不到源文件" alone sent the reader hunting. The retry covers a file that is
+          // momentarily busy (a copy running, an editor mid-write).
+          let text = null
+          let readErr = ''
+          for (let attempt = 0; attempt < 2 && text === null; attempt++) {
+            try {
+              const source = await readIfExists(dir.replace(/\/+$/, '') + '/' + raw)
+              if (source === null) readErr = '读不到（文件不存在，或读取被拒绝）'
+              else text = String(source).replace(/\r\n?/g, '\n')
+            } catch (err) { readErr = (err && err.message) ? err.message : String(err) }
+            if (text === null && attempt === 0) await new Promise(function (r) { setTimeout(r, 300) })
+          }
+          if (text === null) { lines.push('  ✗ ' + raw + ' —— ' + readErr); if (!firstFail) firstFail = raw + '：' + readErr; continue }
           const r = await createNoteFromText(noteName, text, { assetRoot: ASSETS_DIR + '/' + rootId, origin: String(dir).replace(/\\/g, '/') + '/' + raw.replace(/\\/g, '/') })
           if (r.ok) { made += 1; lines.push('  ✓ ' + raw + ' → 《' + noteName + '》') }
           else if (/已存在同名笔记/.test(String(r.error || ''))) { existing += 1; lines.push('  = ' + raw + ' → 《' + noteName + '》已存在，跳过（镜像已复用）') }
-          else lines.push('  ✗ ' + raw + ' —— ' + String(r.error || ''))
+          else { lines.push('  ✗ ' + raw + ' —— ' + String(r.error || '')); if (!firstFail) firstFail = raw + '：' + String(r.error || '') }
         }
         emit('notes', { imported: made, root: rootId })
-        return { ok: made > 0 || existing > 0, rootId: rootId, assetRoot: ASSETS_DIR + '/' + rootId, reused: known !== null, files: counted.files, bytes: counted.bytes, created: lines.join('\n'), error: (made + existing) > 0 ? '' : '没有任何笔记被创建' }
+        return {
+          ok: made > 0 || existing > 0,
+          rootId: rootId,
+          assetRoot: ASSETS_DIR + '/' + rootId,
+          reused: known !== null,
+          files: counted.files,
+          bytes: counted.bytes,
+          created: lines.join('\n'),
+          // The reason travels in `error` too: a toast with room for one line must still say what
+          // went wrong instead of "nothing was created".
+          error: (made + existing) > 0 ? '' : ('没有任何笔记被创建' + (firstFail ? ' —— ' + firstFail : '')),
+        }
         })
       },
     }))
