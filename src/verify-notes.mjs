@@ -197,6 +197,9 @@ let routeHandler = null
 let commandSpec = null
 const commandCtx = { commands: { register(spec) { commandSpec = spec; return () => { } }, unregister() { commandSpec = null; return () => { } } } }
 const promptVariables = new Map()
+// The directory picker is optional and can appear long after apply(), so the host reads it per
+// call. The tests below swap it in and out to prove both the happy path and the explanations.
+let pickerStub = undefined
 const ctx = {
   get(name) {
     if (name === 'fs') return fs
@@ -204,6 +207,7 @@ const ctx = {
     if (name === 'sandboxPolicy') return policy
     if (name === 'sessions') return sessions
     if (name === 'agents') return { currentInitiator: () => null, list: () => [] }
+    if (name === 'directoryPicker') return pickerStub
     if (name === 'tools') return { register(t) { tools.set(t.name, wrapSchemaChecked(t)) } }
     if (name === 'webServer') return { register(spec) { if (String(spec.path).indexOf('/rpc') >= 0) routeHandler = spec.handler; return () => { } } }
     if (name === 'systemPrompt') return { section() { return () => { } }, variable(n, p) { promptVariables.set(n, p); return () => { } }, add() { return () => { } } }
@@ -860,6 +864,44 @@ console.log('the asset mirror (folder import)')
     JSON.stringify({ noteRepos: noteGit.length }))
   const committed = await r('commitAssets', { message: 'assets: test commit' })
   ok('the asset repository commits the mirror', committed.ok === true && isDir(k(WS + '/dsh-window/note/_assets/.git')), JSON.stringify({ ok: committed.ok, hash: committed.hash }))
+}
+
+console.log('the folder picker')
+// The native picker DEREFERENCES its signal (`signal.aborted`), so calling pick(undefined) throws
+// "Cannot read properties of undefined (reading 'aborted')" from inside it, and the button looks
+// like it does nothing at all. This fake picker behaves exactly the same way, so that bug cannot
+// come back unnoticed.
+{
+  const SID_PK = 'session-picker-5555'
+  sessions._m.set(SID_PK, sessionWith(SID_PK, WS))
+  let sawSignal = null
+  let pickCalls = 0
+  pickerStub = {
+    capability: () => ({
+      kind: 'native',
+      pick: async (signal) => {
+        pickCalls += 1
+        sawSignal = signal
+        if (signal === undefined || signal === null) throw new TypeError("Cannot read properties of undefined (reading 'aborted')")
+        if (signal.aborted) throw new Error('aborted')
+        return WS + '/docs-src'
+      },
+    }),
+  }
+  const r = async (m, a) => (await rpc(m, Object.assign({ sessionId: SID_PK }, a || {}))).result || {}
+  const got = await r('pickFolder', {})
+  ok('the folder picker is called with a real signal',
+    pickCalls === 1 && sawSignal !== null && typeof sawSignal.aborted === 'boolean',
+    JSON.stringify({ calls: pickCalls, hasSignal: sawSignal !== null }))
+  ok('a picked folder comes back to the card', got.ok === true && got.dir === WS + '/docs-src', JSON.stringify({ ok: got.ok, dir: got.dir }))
+  pickerStub = undefined
+  const none = await r('pickFolder', {})
+  ok('a missing picker explains how to proceed instead of throwing',
+    none.ok === false && /粘贴/.test(String(none.error)), String(none.error))
+  pickerStub = { capability: () => ({ kind: 'browse' }) }
+  const browse = await r('pickFolder', {})
+  ok('a non-native picker also explains itself', browse.ok === false && /粘贴|弹窗/.test(String(browse.error)), String(browse.error))
+  pickerStub = undefined
 }
 
 console.log(failed === 0 ? '\nALL NOTE-MODEL CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')
