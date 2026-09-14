@@ -1117,6 +1117,38 @@ console.log('the asset mirror (folder import)')
   ok('the asset repository commits the mirror', committed.ok === true && isDir(k(WS + '/dsh-window/note/_assets/.git')), JSON.stringify({ ok: committed.ok, hash: committed.hash }))
 }
 
+console.log('the cost of polling a session with many notes')
+// `notesView` runs on EVERY state poll (the card asks every 0.7s). It used to spawn `git rev-parse`
+// for every note that is not the active one: in a real 16-note session one poll measured 4242 ms,
+// so the card never caught up, switching a note waited behind that backlog for minutes, and every
+// other call on the plugin queued behind the same store lock.
+{
+  const SID_P = 'session-perf-7777'
+  sessions._m.set(SID_P, sessionWith(SID_P, WS))
+  const r = async (m, a) => (await rpc(m, Object.assign({ sessionId: SID_P }, a || {}))).result || {}
+  for (let i = 1; i <= 12; i++) await r('createNote', { name: '笔记 ' + i, text: '# 笔记 ' + i + '\n\n内容\n' })
+  await r('state', { revision: -1 })                                  // cold: builds the cache once
+  const warmStart = gitCalls.length
+  await r('state', { revision: -1 })
+  const warmState = await r('state', { revision: -1 })
+  const warmGit = gitCalls.length - warmStart
+  ok('a warm poll spawns no git command at all (12 notes → it used to be one per note)',
+    warmGit === 0, warmGit + ' git calls across two polls')
+  const rows = warmState.notes || []
+  ok('and the list still carries every note with its size and its head',
+    rows.length === 12 && rows.every((n) => n.lines >= 1 && n.bytes > 0), JSON.stringify(rows.slice(0, 2)))
+  // The cache is keyed by the fs version, so an outside change still has to show up. `bumpVersion`
+  // is what the fake fs does on a write; a raw writeFile would leave the version untouched and the
+  // test would be asserting the fake's shortcut instead of the plugin's invalidation.
+  const otherPath = k(WS + '/dsh-window/note/' + SID_P + '/笔记 3/note.md')
+  writeFile(otherPath, '# 笔记 3\n\n新加的一行\n')
+  bumpVersion(otherPath)
+  const after = await r('state', { revision: -1 })
+  const n3 = (after.notes || []).filter((n) => n.name === '笔记 3')[0]
+  ok('an outside change to a non-active note is picked up (the cache follows the file version)',
+    n3 && n3.lines === 4, JSON.stringify(n3))
+}
+
 console.log('the folder picker')
 // The native picker DEREFERENCES its signal (`signal.aborted`), so calling pick(undefined) throws
 // "Cannot read properties of undefined (reading 'aborted')" from inside it, and the button looks

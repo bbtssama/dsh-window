@@ -996,8 +996,20 @@ return {
       if (shell === undefined) { S.gitReady = false; return }
       if (!canWrite()) { S.gitReady = false; return }
       const wasReady = S.gitReady
+      const dir = activeNote ? sessionRoot() + '/' + activeNote : ''
+      const f = dir === '' ? null : factsOf(dir)
       try {
         if (!S.fileExists) { await writeAt(paths().note, S.text || SEED_TEXT); S.fileExists = true }
+        // Every line below is a subprocess, and a note switch used to pay for three of them every
+        // time (is-inside-work-tree, verify HEAD, short HEAD) — measured 1074 ms in a 16-note
+        // session. A note's repository is only ever written by THIS plugin, so what was learned
+        // about it stays learned; any failure drops the memory and the next call asks again.
+        if (f !== null && f.gitProbed === true && f.gitHasHead === true) {
+          S.commitHash = typeof f.hash === 'string' ? f.hash : ''
+          S.gitReady = true
+          if (!wasReady) S.revision += 1
+          return
+        }
         const probe = await runGit('rev-parse --is-inside-work-tree')
         if (!probe.ok) {
           const init = await runGit('init -q')
@@ -1011,8 +1023,18 @@ return {
         S.commitHash = rev.ok ? rev.out : ''
         if (rev.ok) S.committedAt = isoNow()
         S.gitReady = true
+        if (f !== null) {
+          f.gitProbed = true
+          f.gitHasHead = rev.ok === true
+          f.hash = S.commitHash
+          f.gitFor = f.textV
+        }
         if (!wasReady) S.revision += 1
-      } catch (err) { S.gitReady = false; fail('git', err) }
+      } catch (err) {
+        S.gitReady = false
+        if (f !== null) { f.gitProbed = false; f.gitHasHead = false }
+        fail('git', err)
+      }
     }
     /**
      * Session id of a tool caller / RPC payload, or '' when unidentified.
@@ -1670,6 +1692,15 @@ return {
       const rev = await runGit('rev-parse --short HEAD')
       S.commitHash = rev.ok ? rev.out : ''
       S.committedAt = isoNow()
+      // Keep the per-note facts in step with the commit this plugin just made, so neither the
+      // notes list nor the next note switch has to ask git again.
+      if (activeNote) {
+        const f = factsOf(sessionRoot() + '/' + activeNote)
+        f.gitProbed = true
+        f.gitHasHead = rev.ok === true
+        f.hash = S.commitHash
+        f.gitFor = f.textV
+      }
       emit('git', { hash: S.commitHash })
       return { ok: true, hash: S.commitHash, message: msg }
     }
@@ -1933,43 +1964,105 @@ return {
       return { ok: r && r.exitCode === 0, out: out.trim(), err: err.trim() }
     }
     /** Per-note summary rows for the panel and note_list. */
-    async function notesView() {
-      const names = await listNoteDirs()
-      sessionNotes = names
-      const out = []
-      for (let i = 0; i < names.length; i++) {
-        const name = names[i]
-        const dir = sessionRoot() + '/' + name
-        let lines = 0
-        let bytes = 0
+    /**
+     * Derived per-note facts, keyed by the note's directory and validated by the fs version of the
+     * file each one came from.
+     *
+     * `notesView` runs on every `state`, and the card polls `state` every 0.7 s. It used to read
+     * three files per note and spawn `git rev-parse --short HEAD` for every note that is not the
+     * active one: in a session with 16 notes a single poll measured 4242 ms, so the card was
+     * permanently behind, a note switch queued behind that backlog into "超过一分钟", and every
+     * other call on the plugin waited behind the same store lock. None of these facts change
+     * unless the file behind them changes — and a commit is something only THIS plugin does, so
+     * even the git head needs no subprocess per poll.
+     */
+    const noteFacts = new Map()
+    function factsOf(dir) {
+      let f = noteFacts.get(dir)
+      if (f === undefined) { f = {}; noteFacts.set(dir, f) }
+      return f
+    }
+    /**
+     * The fs version of a file, or '' when it cannot be learned.
+     *
+     * '' means "unknown", and every caller treats it as "always re-read": an empty version must
+     * never be mistaken for "unchanged", or a backend without lstat would cache forever.
+     */
+    async function versionOf(p) {
+      if (fs === undefined) return ''
+      try {
+        const target = await fs.resolve(p, policyCache !== null ? { cwd: policyCache.workspaceRoot } : undefined)
+        const st = await fs.lstat(target)
+        if (!st) return ''
+        if (st.version !== undefined && st.version !== null) return String(st.version)
+        if (st.mtimeMs !== undefined) return String(st.mtimeMs) + '-' + String(st.size)
+        return ''
+      } catch (err) { return '' }
+    }
+    async function noteRow(dir, name) {
+      const f = factsOf(dir)
+      const isActive = name === activeNote
+      const textV = await versionOf(dir + '/' + NOTE_FILE)
+      if (f.textV !== textV || textV === '') {
+        f.textV = textV
+        f.lines = 0
+        f.bytes = 0
         try {
           const raw = await readIfExists(dir + '/' + NOTE_FILE)
-          if (raw !== null) { lines = linesOf(raw).length; bytes = raw.length }
+          if (raw !== null) { f.lines = linesOf(raw).length; f.bytes = raw.length }
         } catch (err) { }
-        let selections = 0
+        // A commit always follows a save, so the head is re-asked once per text change — never
+        // once per poll.
+        f.gitFor = undefined
+      }
+      const stateV = await versionOf(dir + '/' + STATE_FILE)
+      if (f.stateV !== stateV || stateV === '') {
+        f.stateV = stateV
+        f.selections = 0
         try {
           const rawState = await readIfExists(dir + '/' + STATE_FILE)
-          if (rawState !== null) { const parsed = JSON.parse(rawState); if (parsed && Array.isArray(parsed.selections)) selections = parsed.selections.length }
+          if (rawState !== null) {
+            const parsed = JSON.parse(rawState)
+            if (parsed && Array.isArray(parsed.selections)) f.selections = parsed.selections.length
+          }
         } catch (err) { }
-        let commitHash = ''
-        // Where the reader had got to in THIS note — the agent asked for it implicitly by
-        // listing notes, and it is the one piece of the user's card state it could not see.
-        let viewLine = 0
+      }
+      const viewV = await versionOf(dir + '/' + VIEW_FILE)
+      if (f.viewV !== viewV || viewV === '') {
+        f.viewV = viewV
+        f.viewLine = 0
         try {
           const rawView = await readIfExists(dir + '/' + VIEW_FILE)
           if (rawView !== null) {
             const pv = JSON.parse(rawView)
-            if (pv && Number.isFinite(Number(pv.line))) viewLine = Math.max(1, Math.round(Number(pv.line)))
+            if (pv && Number.isFinite(Number(pv.line))) f.viewLine = Math.max(1, Math.round(Number(pv.line)))
           }
         } catch (err) { }
-        if (name === activeNote) commitHash = S.commitHash
-        else {
-          const r = await runGitIn(dir, 'rev-parse --short HEAD')
-          if (r.ok) commitHash = r.out
-        }
-        out.push({ name: name, active: name === activeNote, lines: lines, bytes: bytes, commitHash: commitHash, selections: selections, line: viewLine })
       }
-      return out
+      if (isActive) f.hash = S.commitHash
+      else if (f.gitFor !== f.textV) {
+        f.gitFor = f.textV
+        const r = await runGitIn(dir, 'rev-parse --short HEAD')
+        f.hash = r.ok ? r.out : ''
+        // A successful `rev-parse --short HEAD` answers both questions ensureGit() would ask with
+        // two more subprocesses — the directory IS a repository, and it HAS a commit — so a later
+        // switch to this note costs nothing. A failure is left unknown on purpose: it could be
+        // "not a repo" or "no commits yet", and only the full probe can tell them apart.
+        if (r.ok) { f.gitProbed = true; f.gitHasHead = true }
+      }
+      return {
+        name: name, active: isActive,
+        lines: intOr(f.lines, 0), bytes: intOr(f.bytes, 0),
+        commitHash: typeof f.hash === 'string' ? f.hash : '',
+        selections: intOr(f.selections, 0), line: intOr(f.viewLine, 0),
+      }
+    }
+    async function notesView() {
+      const names = await listNoteDirs()
+      sessionNotes = names
+      // In parallel: the first poll of a session pays for all the git heads at once instead of in
+      // a row, and every poll after that pays nothing at all.
+      return await Promise.all(names.map(function (name) { return noteRow(sessionRoot() + '/' + name, name) }))
     }
     async function runGitIn(dir, args) {
       if (shell === undefined) return { ok: false, out: '', err: 'shell 服务不可用' }
