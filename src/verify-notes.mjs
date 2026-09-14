@@ -54,6 +54,34 @@ function writeFile(p, content) {
 function isDir(p) { return dirs.has(k(p)) }
 /** Is there a regular file at this path? (writeFile is the only way one appears.) */
 function isFile(p) { return files.has(k(p)) }
+/**
+ * A recursive copy, as the mirror's shell command would do it. With `onlyNewer` it skips a file
+ * whose content is already identical at the destination — the stand-in for robocopy /XO (the
+ * fake filesystem has no mtimes, and "content differs" is the property the re-sync depends on).
+ * Returns how many files it actually copied, which is what the incremental test asserts on.
+ */
+function copyTree(src, dst, onlyNewer, skipDirs, skipFiles) {
+  const srcKey = k(src)
+  const dstKey = k(dst)
+  const skipD = skipDirs || []
+  const skipF = skipFiles || []
+  let copied = 0
+  for (const f of [...files.keys()]) {
+    if (f !== srcKey && !f.startsWith(srcKey + '/')) continue
+    const rel = f.slice(srcKey.length).replace(/^\//, '')
+    const segs = rel.split('/')
+    const name = segs[segs.length - 1]
+    if (segs.slice(0, -1).some((s) => skipD.indexOf(s) >= 0)) continue
+    if (skipF.indexOf(name) >= 0) continue
+    const target = dstKey + f.slice(srcKey.length)
+    if (onlyNewer && files.get(target) === files.get(f)) continue
+    writeFile(target, files.get(f))
+    copied++
+  }
+  for (const d of [...dirs]) if (d === srcKey || d.startsWith(srcKey + '/')) putDir(dstKey + d.slice(srcKey.length))
+  putDir(dstKey)
+  return copied
+}
 function childrenOf(p) {
   const prefix = k(p).replace(/\/$/, '') + '/'
   const out = new Map()
@@ -111,6 +139,9 @@ const fs = {
 
 // ── fake shell: git is a no-op, but directory operations really happen ──────────
 const gitCalls = []
+// How many files each mirror command actually COPIED — the incremental re-sync is asserted with
+// this, because "the file is still there" cannot tell a copy from a skip.
+const copyStats = []
 const shell = {
   resolve: (r) => r,
   async run(req) {
@@ -125,13 +156,28 @@ const shell = {
     }
     const rm = /Remove-Item -LiteralPath "([^"]+)"/.exec(cmd)
     if (rm) { removeSubtree(rm[1]); return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } } }
+    // robocopy "<src>" "<dst>" /E … [/XO] [/XD "…"] [/XF "…"] — the mirror's Windows command.
+    const rc = /^robocopy "([^"]+)" "([^"]+)"(.*)$/.exec(cmd)
+    if (rc) {
+      const rest = rc[3]
+      const skipDirs = [...rest.matchAll(/\/XD "([^"]+)"/g)].map((m) => m[1])
+      const skipFiles = [...rest.matchAll(/\/XF "([^"]+)"/g)].map((m) => m[1])
+      const copied = copyTree(rc[1], rc[2], /\s\/XO(\s|$)/.test(rest), skipDirs, skipFiles)
+      copyStats.push({ cmd: 'robocopy', src: k(rc[1]), dst: k(rc[2]), copied, incremental: /\s\/XO(\s|$)/.test(rest) })
+      return { exitCode: copied > 0 ? 1 : 0, stdout: { text: '' }, stderr: { text: '' } }
+    }
+    // cp -R / cp -Ru "<src>/." "<dst>" — the POSIX command.
+    const cpr = /^cp -R(u?) "([^"]+)" "([^"]+)"$/.exec(cmd)
+    if (cpr) {
+      const src = cpr[2].replace(/\/\.$/, '')
+      const copied = copyTree(src, cpr[3], cpr[1] === 'u')
+      copyStats.push({ cmd: 'cp', src: k(src), dst: k(cpr[3]), copied, incremental: cpr[1] === 'u' })
+      return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
+    }
     const cp = /Copy-Item -LiteralPath "([^"]+)" -Destination "([^"]+)" -Recurse/.exec(cmd)
     if (cp) {
-      const srcKey = k(cp[1])
-      const dstKey = k(cp[2])
-      for (const f of [...files.keys()]) if (f === srcKey || f.startsWith(srcKey + '/')) writeFile(dstKey + f.slice(srcKey.length), files.get(f))
-      for (const d of [...dirs]) if (d === srcKey || d.startsWith(srcKey + '/')) putDir(dstKey + d.slice(srcKey.length))
-      putDir(dstKey)
+      const copied = copyTree(cp[1], cp[2], false)
+      copyStats.push({ cmd: 'Copy-Item', src: k(cp[1]), dst: k(cp[2]), copied, incremental: false })
       return { exitCode: 0, stdout: { text: '' }, stderr: { text: '' } }
     }
     const mv = /Move-Item -LiteralPath "([^"]+)" -Destination "([^"]+)"/.exec(cmd)
@@ -504,12 +550,13 @@ sessions._m.set(SID_D, sessionWith(SID_D, WS))
   writeFile(WS + '/toolcheck-src/only.md', '# 只有一个文件\n')
   await t('note_import_folder', { dir: WS + '/toolcheck-src', files: ['only.md'] })
   await t('note_assets', { note: 'only' })
+  await t('note_sync', { note: 'only' })
 }
 const neverCalled = [...tools.keys()].filter((n) => !exercised.has(n))
 ok('every registered tool was exercised on a success path',
   neverCalled.length === 0,
   neverCalled.length ? 'never called: ' + neverCalled.join(',') : exercised.size + ' tools exercised')
-ok('the tool count still matches what the client and the docs expect', tools.size === 30, String(tools.size))
+ok('the tool count still matches what the client and the docs expect', tools.size === 31, String(tools.size))
 
 console.log('every RPC handler answers')
 // One handler, clearSelections, was declared without its `args` parameter while its body used
@@ -847,6 +894,43 @@ console.log('the asset mirror (folder import)')
   ok('an absolute path is refused', abs.ok === false && /越界|相对路径/.test(String(esc.error) + String(abs.error)), String(abs.error))
   const noteDirImg = await r('asset', { path: 'note.md' })
   ok('a missing file reports the root it searched', noteDirImg.ok === false && /找不到|素材根/.test(String(noteDirImg.error)), String(noteDirImg.error))
+
+  // ── re-sync with the source folder ──────────────────────────────────────────────
+  // Nothing changed at the source: the mirror must not be re-copied file by file (that is what
+  // the incremental copy is for), and the note text must be left alone.
+  copyStats.length = 0
+  const sync1 = await asTool('note_sync', { note: 'README' }, SID_AS)
+  ok('a sync with nothing changed copies no file again',
+    sync1.ok === true && sync1.changed === false && copyStats.length === 1 && copyStats[0].incremental === true && copyStats[0].copied === 0,
+    JSON.stringify({ changed: sync1.changed, stats: copyStats[0] }))
+  // Now the source .md changes, plus a new image appears in the source folder.
+  writeFile(srcDir + '/README.md', '# 主笔记（改过）\n\n![图](./img/a.png)\n\n![新图](./img/new.png)\n\n![缺失](./img/nope.png)\n')
+  writeFile(srcDir + '/img/new.png', 'PNGDATA-2')
+  const sync2 = await asTool('note_sync', { note: 'README' }, SID_AS)
+  ok('a sync takes the new source text', sync2.ok === true && sync2.changed === true, JSON.stringify({ ok: sync2.ok, changed: sync2.changed }))
+  const noteText = String(files.get(k(WS + '/dsh-window/note/' + SID_AS + '/README/note.md')) || '')
+  ok('the note body really is the new one', noteText.indexOf('主笔记（改过）') >= 0, noteText.split('\n')[0])
+  ok('a new file in the source folder reaches the mirror', isFile(WS + '/dsh-window/note/_assets/' + rootId + '/img/new.png'), 'img/new.png mirrored')
+  ok('the sync reports which references resolve and which do not',
+    typeof sync2.refs === 'string' && /引用 3 处/.test(sync2.refs) && /缺失 1/.test(sync2.refs) && /nope\.png/.test(sync2.refs),
+    sync2.refs.split('\n')[0])
+  const resolvedNew = await r('asset', { path: './img/new.png' })
+  ok('the newly mirrored image resolves for the card', resolvedNew.ok === true && resolvedNew.size > 0, JSON.stringify({ ok: resolvedNew.ok, hit: resolvedNew.hit }))
+  // Marks survive a sync: the text moved, so they are re-anchored, not dropped.
+  const marked = await r('addSelection', { startLine: 1, startCol: 0, endLine: 1, endCol: 5 })
+  const sync3 = await asTool('note_sync', { note: 'README' }, SID_AS)
+  const stillThere = ((await r('state', { revision: -1 })).selections || []).filter((s) => s.id === marked.id)
+  ok('a sync keeps the marks', sync3.ok === true && stillThere.length === 1, JSON.stringify({ marks: stillThere.length }))
+  // A note that was not imported from a folder has nothing to sync with, and must say so.
+  const plain = await r('createNote', { name: '没有来源', text: '# 手写的\n' })
+  ok('a note created by hand has no origin', plain.ok === true, JSON.stringify({ ok: plain.ok }))
+  const sync4 = await asTool('note_sync', { note: '没有来源' }, SID_AS)
+  ok('syncing a note without an origin explains itself', sync4.ok === false && /没有可同步的来源/.test(sync4.error), sync4.error)
+  // Importing a folder whose note already exists is NOT a failure (it says so and moves on).
+  const again = await asTool('note_import_folder', { dir: srcDir, files: ['README.md'] }, SID_AS)
+  ok('re-importing an existing note is not reported as a failure',
+    again.ok === true && /已存在/.test(again.created) && again.created.indexOf('✗') < 0,
+    again.created.replace(/\n/g, ' | '))
   // A note that was never imported from a folder has no root, and that must be sayable.
   await r('createNote', { name: '无素材', text: '# 没有素材根\n' })
   const noRoot = await r('asset', { path: './img/a.png' })

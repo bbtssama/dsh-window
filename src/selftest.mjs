@@ -263,7 +263,7 @@ const leaked = retiredNames.filter((n) => new RegExp('\\b' + n + '\\b').test(hos
 ok('no retired identifier survives in shipped code', leaked.length === 0, leaked.join(','))
 
 ok('every note tool resolves its workspace explicitly and loudly',
-  (hostSource.match(/await enterFromTool\('note_/g) || []).length === 30,
+  (hostSource.match(/await enterFromTool\('note_/g) || []).length === 31,
   String((hostSource.match(/await enterFromTool\('note_/g) || []).length) + ' guarded tool entry points')
 
 // The panel and the host must agree on method names, and every note-space call must

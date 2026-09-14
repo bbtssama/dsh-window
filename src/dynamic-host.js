@@ -501,12 +501,15 @@ return {
     /**
      * Mirror one source folder into the asset area.
      *
-     * The copy itself goes through the shell (PowerShell `Copy-Item` / POSIX `cp -R`) because the
-     * fs service can read bytes but has no binary WRITE — a text write would corrupt an image.
-     * The exclusion list is applied after the copy (a plain recursive copy has no filter), which
-     * also keeps the command simple enough to be exercised by the test shell.
+     * The copy itself goes through the shell (robocopy / `cp -R`) because the fs service can read
+     * bytes but has no binary WRITE — a text write would corrupt an image. The exclusion list is
+     * applied after the copy, which also keeps the command simple enough for the test shell.
+     *
+     * `opts.incremental` copies only files that are newer at the source (robocopy /XO, cp -Ru):
+     * re-syncing a 26MB folder must not re-copy 26MB every time.
      */
-    async function mirrorFolder(srcDir, rootId) {
+    async function mirrorFolder(srcDir, rootId, opts) {
+      const incremental = !!(opts && opts.incremental)
       const src = String(srcDir).replace(/\\/g, '/').replace(/\/+$/, '')
       const dest = assetsRoot() + '/' + rootId
       await mkdirAt(assetsRoot())
@@ -514,9 +517,17 @@ return {
       if (shell === undefined) return { ok: false, error: 'shell 服务不可用（镜像需要它来复制文件）' }
       const q = function (p) { return '"' + String(p) + '"' }
       const isWin = /^[A-Za-z]:/.test(src) || String(srcDir).indexOf('\\') >= 0
-      const commands = isWin
-        ? ['Copy-Item -LiteralPath ' + q(src) + ' -Destination ' + q(dest) + ' -Recurse -Force']
-        : ['cp -R ' + q(src + '/.') + ' ' + q(dest)]
+      const commands = []
+      if (isWin) {
+        // robocopy: /E keeps the tree, /XO skips files that are not newer, /XD and /XF keep the
+        // junk out of the copy entirely (copy-then-delete re-copied every excluded file on every
+        // sync). Exit codes 0..7 mean success (1 = copied, 2 = extras present, 3 = both…).
+        const xd = MIRROR_SKIP_DIRS.map(function (d) { return '/XD ' + q(d) }).join(' ')
+        const xf = MIRROR_SKIP_FILES.map(function (f) { return '/XF ' + q(f) }).join(' ')
+        commands.push('robocopy ' + q(src) + ' ' + q(dest) + ' /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 ' + xd + ' ' + xf + (incremental ? ' /XO' : ''))
+      } else {
+        commands.push('cp -R' + (incremental ? 'u' : '') + ' ' + q(src + '/.') + ' ' + q(dest))
+      }
       for (let i = 0; i < MIRROR_SKIP_DIRS.length; i++) {
         const junk = dest + '/' + MIRROR_SKIP_DIRS[i]
         commands.push(isWin ? 'Remove-Item -LiteralPath ' + q(junk) + ' -Recurse -Force -ErrorAction SilentlyContinue' : 'rm -rf ' + q(junk))
@@ -537,12 +548,13 @@ return {
           continue
         }
         const code = res && typeof res.exitCode === 'number' ? res.exitCode : 0
-        if (i === 0 && code !== 0) {
+        const copyOk = isWin ? code < 8 : code === 0
+        if (i === 0 && !copyOk) {
           const errText = res && res.stderr && typeof res.stderr.text === 'string' ? res.stderr.text.trim() : ''
           return { ok: false, error: '镜像失败（退出码 ' + code + '）: ' + errText.slice(0, 300) }
         }
       }
-      return { ok: true, dest: dest }
+      return { ok: true, dest: dest, incremental: incremental }
     }
     /** The mirror has ONE repository, and it tracks the whole asset area. */
     async function ensureAssetsGit() {
@@ -569,7 +581,118 @@ return {
       const rev = await runGitIn(dir, 'rev-parse --short HEAD')
       return { ok: true, hash: rev.ok ? rev.out : '' }
     }
-    /** `.md` files of a folder (one level), for the import dialog. */
+    /** Every local (non-http) reference in a note's text: images, and other files it links to. */
+    function localRefsOf(text) {
+      const out = []
+      const seen = {}
+      const push = function (raw, kind) {
+        const p = String(raw || '').trim()
+        if (p === '' || /^[a-z]+:\/\//i.test(p) || p.charAt(0) === '#' || p.indexOf('mailto:') === 0) return
+        if (seen[p]) return
+        seen[p] = 1
+        out.push({ raw: p, kind: kind })
+      }
+      const md = /!\[[^\]]*\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g
+      let m = md.exec(text)
+      while (m !== null) { push(m[1], 'image'); m = md.exec(text) }
+      const html = /<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi
+      m = html.exec(text)
+      while (m !== null) { push(m[1], 'image'); m = html.exec(text) }
+      const link = /\[[^\]]*\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g
+      m = link.exec(text)
+      while (m !== null) { push(m[1], /\.(png|jpe?g|gif|webp|svg|avif|bmp)$/i.test(m[1]) ? 'image' : 'file'); m = link.exec(text) }
+      return out
+    }
+    /** Which of a note's references actually exist in its mirror — the "图没了" report. */
+    async function referenceReport(forName) {
+      const meta = await readNoteMeta(forName)
+      const root = typeof meta.assetRoot === 'string' ? meta.assetRoot : ''
+      const noteName = forName === undefined || forName === null || forName === '' ? activeNote : String(forName)
+      let text = ''
+      if (noteName === activeNote) text = String(S.text)
+      else {
+        try {
+          const raw = await readIfExists(sessionRoot() + '/' + noteName + '/' + NOTE_FILE)
+          if (raw !== null) text = String(raw)
+        } catch (err) { }
+      }
+      const refs = localRefsOf(text)
+      const missing = []
+      let hit = 0
+      const mirrorBase = root === '' ? '' : (noteSpaceRoot() + '/' + root.replace(/^.*?_assets\//, ASSETS_DIR + '/'))
+      for (let i = 0; i < refs.length; i++) {
+        const r = refs[i]
+        // The same textual normalisation the asset resolver uses, so this report cannot disagree
+        // with what the card will actually do.
+        const rel = r.raw.replace(/\\/g, '/').split('/').reduce(function (acc, seg) {
+          if (seg === '' || seg === '.') return acc
+          if (seg === '..') { acc.pop(); return acc }
+          acc.push(seg)
+          return acc
+        }, []).join('/')
+        let found = false
+        if (mirrorBase !== '' && rel !== '') {
+          try {
+            const target = await fs.resolve(mirrorBase + '/' + rel)
+            const st = await fs.lstat(target)
+            found = st !== undefined && st !== null
+          } catch (err) { found = false }
+        }
+        if (found) hit += 1
+        else if (r.kind === 'image') missing.push(r.raw)
+      }
+      return { total: refs.length, images: refs.filter(function (x) { return x.kind === 'image' }).length, hit: hit, missing: missing, root: root }
+    }
+    /**
+     * Re-sync one note with the folder it was imported from: mirror the folder again (incrementally)
+     * and, if the source `.md` changed, take its new text — re-anchoring the marks and putting the
+     * reader back where they were (the anchor text decides, so an inserted paragraph does not
+     * throw the position away).
+     */
+    async function syncNoteFromOrigin(name) {
+      const meta = await readNoteMeta(name)
+      const origin = typeof meta.origin === 'string' ? meta.origin : ''
+      const root = typeof meta.assetRoot === 'string' ? meta.assetRoot : ''
+      if (origin === '') return { ok: false, error: '这份笔记不是从文件夹导入的，没有可同步的来源', changed: false, files: 0, bytes: 0, refs: null }
+      const cut = origin.lastIndexOf('/')
+      const sourceDir = cut > 0 ? origin.slice(0, cut) : origin
+      const sourceFile = origin
+      const rootId = root.replace(/^.*?_assets\//, '')
+      const mirror = await mirrorFolder(sourceDir, rootId, { incremental: true })
+      if (!mirror.ok) return { ok: false, error: String(mirror.error), changed: false, files: 0, bytes: 0, refs: null }
+      const counted = await countTree(assetsRoot() + '/' + rootId)
+      const index = await readAssetsIndex()
+      const roots = index.roots.map(function (r) {
+        if (r && r.id === rootId) return Object.assign({}, r, { files: counted.files, bytes: counted.bytes, mirroredAt: isoNow() })
+        return r
+      })
+      await writeAssetsIndex({ roots: roots })
+      let sourceText = null
+      try {
+        const raw = await readIfExists(sourceFile)
+        if (raw !== null) sourceText = String(raw).replace(/\r\n?/g, '\n')
+      } catch (err) { }
+      if (sourceText === null) return { ok: true, changed: false, files: counted.files, bytes: counted.bytes, refs: null, warn: '镜像已更新，但读不到来源 .md：' + sourceFile }
+      let changed = false
+      await useNote(name, async function () {
+        if (sourceText !== S.text) {
+          const before = String(S.view && typeof S.view.line === 'number' ? S.view.line : 0)
+          const r = await saveText(sourceText, undefined)
+          changed = r && r.ok === true
+          // Put the reader back: the view is unchanged, so an explicit event makes the card
+          // re-anchor onto the same sentence even though the text just moved under it.
+          if (S.view && S.view.line) emit('view', { line: S.view.line, anchor: S.view.anchor || '', jump: 0, sync: true })
+          else if (before) emit('view', { line: before, anchor: '', jump: 0, sync: true })
+        }
+      })
+      const refs = await referenceReport(name)
+      emit('marks', { revision: S.revision })
+      return {
+        ok: true, changed: changed, files: counted.files, bytes: counted.bytes, refs: refs,
+        note: name, source: sourceFile,
+        warn: changed ? '' : '来源 .md 与笔记内容一致，只更新了素材镜像',
+      }
+    }
     async function listMarkdownIn(dir) {
       const out = []
       let entries = []
@@ -1402,6 +1525,14 @@ return {
         parts.push(head + remark + '\n' + s.text.split('\n').map(function (l) { return '    ' + l }).join('\n'))
       }
       return parts.join('\n\n')
+    }
+    /** Text render of the "reference → hit" table: what the card will be able to show. */
+    function refRender(refs) {
+      if (!refs) return ''
+      const head = '引用 ' + refs.total + ' 处（图片 ' + refs.images + '）· 命中 ' + refs.hit
+      if (!refs.missing || !refs.missing.length) return head + ' · 没有缺失'
+      const list = refs.missing.slice(0, 12).map(function (x) { return '    ✗ ' + x }).join('\n')
+      return head + ' · 缺失 ' + refs.missing.length + '：\n' + list + (refs.missing.length > 12 ? '\n    …还有 ' + (refs.missing.length - 12) + ' 处' : '')
     }
     /** Text render of the custom lists, for note_lists and the tool card. */
     function listRender(listsView) {
@@ -2328,6 +2459,19 @@ return {
         return { ok: false, error: '找不到 ' + p + '（素材根 ' + root + '）: ' + lastErr }
       } catch (err) { return { ok: false, error: (err && err.message) ? err.message : String(err) } }
     })
+    /** Re-sync a note with its source folder: mirror + take the source .md if it changed. */
+    handleLocked('syncNote', async function (args) {
+      await ensureLoaded()
+      const note = args && args.note ? sanitizeNoteName(args.note) : activeNote
+      if (!note) return { ok: false, error: '本会话没有打开的笔记' }
+      const r = await syncNoteFromOrigin(note)
+      return {
+        ok: r.ok === true, note: note, changed: r.changed === true, files: intOr(r.files, 0), bytes: intOr(r.bytes, 0),
+        refs: r.refs || null, source: typeof r.source === 'string' ? r.source : '',
+        warn: typeof r.warn === 'string' ? r.warn : '',
+        error: r.ok ? '' : String(r.error || ''),
+      }
+    })
     /** What the card and the tools need to know about this note's assets. */
     handleLocked('assets', async function (args) {
       await ensureLoaded()
@@ -2361,56 +2505,74 @@ return {
      * Import a folder: mirror it once into the asset area, then create one note per selected
      * `.md`. Every note of that folder SHARES the single mirrored root, which is what stops a
      * folder with ten markdown files from being copied ten times.
+     *
+     * ONE implementation for the card's RPC and the agent's tool. They used to be two copies, and
+     * the RPC one still reported "already exists" as a failure — so pressing the button twice said
+     * 没有任何笔记被创建 even though the note was there (reported as "导入老是失败").
      */
-    handleLocked('importFolder', async function (args) {
-      await ensureLoaded()
-      const a = args || {}
-      const dir = String(a.dir || '').trim()
-      const files = Array.isArray(a.files) ? a.files.filter(function (f) { return typeof f === 'string' && f !== '' }) : []
-      if (dir === '') return { ok: false, error: '需要 dir' }
-      if (!files.length) return { ok: false, error: '至少选一个 .md 文件' }
+    async function runFolderImport(a) {
+      const dir = String((a && a.dir) || '').trim()
+      const files = Array.isArray(a && a.files) ? a.files.filter(function (f) { return typeof f === 'string' && f !== '' }) : []
+      if (dir === '') return { ok: false, rootId: '', assetRoot: '', reused: false, files: 0, bytes: 0, created: [], error: '需要 dir' }
+      if (!files.length) return { ok: false, rootId: '', assetRoot: '', reused: false, files: 0, bytes: 0, created: [], error: '至少选一个 .md 文件' }
       const rootId = assetRootIdFor(dir)
       const dest = assetsRoot() + '/' + rootId
       const index = await readAssetsIndex()
       const known = index.roots.filter(function (r) { return r && r.id === rootId })[0] || null
-      const mirror = await mirrorFolder(dir, rootId)
-      if (!mirror.ok) return { ok: false, error: mirror.error }
+      const mirror = await mirrorFolder(dir, rootId, { incremental: known !== null })
+      if (!mirror.ok) return { ok: false, rootId: rootId, assetRoot: '', reused: known !== null, files: 0, bytes: 0, created: [], error: String(mirror.error) }
       const counted = await countTree(dest)
-      if (counted.files > MIRROR_MAX_FILES) return { ok: false, error: '这个目录有 ' + counted.files + ' 个文件，超过镜像上限 ' + MIRROR_MAX_FILES }
-      if (counted.bytes > MIRROR_MAX_BYTES) return { ok: false, error: '这个目录约 ' + Math.round(counted.bytes / 1048576) + ' MB，超过镜像上限 ' + Math.round(MIRROR_MAX_BYTES / 1048576) + ' MB' }
-      const nextRoots = index.roots.filter(function (r) { return r && r.id !== rootId })
-      nextRoots.push({
-        id: rootId, label: sanitizeNoteName(String(a.label || '')) || rootId, source: String(dir),
-        mirroredAt: isoNow(), files: counted.files, bytes: counted.bytes, mode: 'all',
-        reuse: known !== null,
-      })
-      await writeAssetsIndex({ roots: nextRoots })
+      if (counted.files > MIRROR_MAX_FILES) return { ok: false, rootId: rootId, assetRoot: '', reused: known !== null, files: counted.files, bytes: counted.bytes, created: [], error: '这个目录有 ' + counted.files + ' 个文件，超过镜像上限 ' + MIRROR_MAX_FILES }
+      if (counted.bytes > MIRROR_MAX_BYTES) return { ok: false, rootId: rootId, assetRoot: '', reused: known !== null, files: counted.files, bytes: counted.bytes, created: [], error: '这个目录约 ' + Math.round(counted.bytes / 1048576) + ' MB，超过镜像上限 ' + Math.round(MIRROR_MAX_BYTES / 1048576) + ' MB' }
+      const roots = index.roots.filter(function (r) { return r && r.id !== rootId })
+      roots.push({ id: rootId, label: sanitizeNoteName(String((a && a.label) || '')) || rootId, source: dir, mirroredAt: isoNow(), files: counted.files, bytes: counted.bytes, mode: 'all', reuse: known !== null })
+      await writeAssetsIndex({ roots: roots })
       const created = []
+      let made = 0
+      let existing = 0
+      let firstFail = ''
       for (let i = 0; i < files.length; i++) {
         const raw = String(files[i])
         const fileName = raw.split(/[\\/]/).pop()
         const noteName = sanitizeNoteName(fileName.replace(/\.(md|markdown)$/i, ''))
-        if (!noteName) { created.push({ file: raw, ok: false, error: '名字不合法' }); continue }
-        let text = ''
-        try {
-          const source = await readIfExists(dir.replace(/\/+$/, '') + '/' + raw)
-          if (source === null) { created.push({ file: raw, ok: false, error: '读不到源文件' }); continue }
-          text = String(source).replace(/\r\n?/g, '\n')
-        } catch (err) { created.push({ file: raw, ok: false, error: (err && err.message) || String(err) }); continue }
-        const r = await createNoteFromText(noteName, text, { assetRoot: ASSETS_DIR + '/' + rootId, origin: String(dir).replace(/\\/g, '/') + '/' + raw.replace(/\\/g, '/') })
-        created.push({ file: raw, note: noteName, ok: r.ok === true, error: r.ok ? '' : String(r.error || '') })
+        if (!noteName) { created.push({ file: raw, ok: false, error: '名字不合法' }); if (!firstFail) firstFail = raw + '：名字不合法'; continue }
+        // Keep the REAL read error (readIfExists swallows it) and retry once: a file can be
+        // momentarily busy while something else is writing it.
+        let text = null
+        let readErr = ''
+        for (let attempt = 0; attempt < 2 && text === null; attempt++) {
+          try {
+            const source = await readIfExists(dir.replace(/\/+$/, '') + '/' + raw)
+            if (source === null) readErr = '读不到（文件不存在，或读取被拒绝）'
+            else text = String(source).replace(/\r\n?/g, '\n')
+          } catch (err) { readErr = (err && err.message) ? err.message : String(err) }
+          if (text === null && attempt === 0) await new Promise(function (r) { setTimeout(r, 300) })
+        }
+        if (text === null) { created.push({ file: raw, ok: false, error: readErr }); if (!firstFail) firstFail = raw + '：' + readErr; continue }
+        const r = await createNoteFromText(noteName, text, { assetRoot: ASSETS_DIR + '/' + rootId, origin: dir.replace(/\\/g, '/') + '/' + raw.replace(/\\/g, '/') })
+        if (r.ok) { made += 1; created.push({ file: raw, note: noteName, ok: true, error: '' }) }
+        else if (/已存在同名笔记/.test(String(r.error || ''))) { existing += 1; created.push({ file: raw, note: noteName, ok: true, existing: true, error: '' }) }
+        else { created.push({ file: raw, note: noteName, ok: false, error: String(r.error || '') }); if (!firstFail) firstFail = raw + '：' + String(r.error || '') }
       }
-      const okCount = created.filter(function (c) { return c.ok }).length
-      emit('notes', { imported: okCount, root: rootId })
+      emit('notes', { imported: made, root: rootId })
       return {
-        ok: okCount > 0,
-        rootId: rootId,
-        assetRoot: ASSETS_DIR + '/' + rootId,
-        reused: known !== null,
-        files: counted.files,
-        bytes: counted.bytes,
-        created: created,
-        error: okCount > 0 ? '' : '没有任何笔记被创建',
+        ok: made > 0 || existing > 0, rootId: rootId, assetRoot: ASSETS_DIR + '/' + rootId, reused: known !== null,
+        files: counted.files, bytes: counted.bytes, created: created, made: made, existing: existing,
+        error: (made + existing) > 0 ? '' : ('没有任何笔记被创建' + (firstFail ? ' —— ' + firstFail : '')),
+      }
+    }
+    /** The card's import: same logic, plus the lines rendered for a human. */
+    handleLocked('importFolder', async function (args) {
+      await ensureLoaded()
+      const r = await runFolderImport(args || {})
+      const lines = (r.created || []).map(function (c) {
+        if (c.ok && c.existing) return '  = ' + c.file + ' → 《' + c.note + '》已存在，跳过（镜像已更新）'
+        if (c.ok) return '  ✓ ' + c.file + ' → 《' + c.note + '》'
+        return '  ✗ ' + c.file + ' —— ' + c.error
+      }).join('\n')
+      return {
+        ok: r.ok, rootId: r.rootId, assetRoot: r.assetRoot, reused: r.reused, files: r.files, bytes: r.bytes,
+        made: intOr(r.made, 0), existing: intOr(r.existing, 0), created: lines, error: r.error,
       }
     })
     /** The asset mirror's one repository: commit what the mirror holds right now. */
@@ -2948,62 +3110,36 @@ return {
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_import_folder', exec, { allowEmpty: true })
-        const a = args || {}
-        const dir = String(a.dir || '').trim()
-        if (dir === '') return { ok: false, rootId: '', assetRoot: '', reused: false, files: 0, bytes: 0, created: '', error: '需要 dir' }
-        const files = Array.isArray(a.files) ? a.files : []
-        if (!files.length) return { ok: false, rootId: '', assetRoot: '', reused: false, files: 0, bytes: 0, created: '', error: '需要 files（至少一个 .md）' }
-        const rootId = assetRootIdFor(dir)
-        const index = await readAssetsIndex()
-        const known = index.roots.filter(function (r) { return r && r.id === rootId })[0] || null
-        const mirror = await mirrorFolder(dir, rootId)
-        if (!mirror.ok) return { ok: false, rootId: rootId, assetRoot: '', reused: false, files: 0, bytes: 0, created: '', error: String(mirror.error) }
-        const counted = await countTree(assetsRoot() + '/' + rootId)
-        if (counted.files > MIRROR_MAX_FILES) return { ok: false, rootId: rootId, assetRoot: '', reused: false, files: counted.files, bytes: counted.bytes, created: '', error: '这个目录有 ' + counted.files + ' 个文件，超过镜像上限 ' + MIRROR_MAX_FILES }
-        if (counted.bytes > MIRROR_MAX_BYTES) return { ok: false, rootId: rootId, assetRoot: '', reused: false, files: counted.files, bytes: counted.bytes, created: '', error: '超过镜像上限 ' + Math.round(MIRROR_MAX_BYTES / 1048576) + ' MB' }
-        const roots = index.roots.filter(function (r) { return r && r.id !== rootId })
-        roots.push({ id: rootId, label: sanitizeNoteName(String(a.label || '')) || rootId, source: dir, mirroredAt: isoNow(), files: counted.files, bytes: counted.bytes, mode: 'all', reuse: known !== null })
-        await writeAssetsIndex({ roots: roots })
-        const lines = []
-        let made = 0
-        let existing = 0
-        let firstFail = ''
-        for (let i = 0; i < files.length; i++) {
-          const raw = String(files[i])
-          const fileName = raw.split(/[\\/]/).pop()
-          const noteName = sanitizeNoteName(fileName.replace(/\.(md|markdown)$/i, ''))
-          if (!noteName) { lines.push('  ✗ ' + raw + ' —— 名字不合法'); if (!firstFail) firstFail = raw + '：名字不合法'; continue }
-          // Read the source with its REAL reason visible: readIfExists() swallows the error, and
-          // "读不到源文件" alone sent the reader hunting. The retry covers a file that is
-          // momentarily busy (a copy running, an editor mid-write).
-          let text = null
-          let readErr = ''
-          for (let attempt = 0; attempt < 2 && text === null; attempt++) {
-            try {
-              const source = await readIfExists(dir.replace(/\/+$/, '') + '/' + raw)
-              if (source === null) readErr = '读不到（文件不存在，或读取被拒绝）'
-              else text = String(source).replace(/\r\n?/g, '\n')
-            } catch (err) { readErr = (err && err.message) ? err.message : String(err) }
-            if (text === null && attempt === 0) await new Promise(function (r) { setTimeout(r, 300) })
-          }
-          if (text === null) { lines.push('  ✗ ' + raw + ' —— ' + readErr); if (!firstFail) firstFail = raw + '：' + readErr; continue }
-          const r = await createNoteFromText(noteName, text, { assetRoot: ASSETS_DIR + '/' + rootId, origin: String(dir).replace(/\\/g, '/') + '/' + raw.replace(/\\/g, '/') })
-          if (r.ok) { made += 1; lines.push('  ✓ ' + raw + ' → 《' + noteName + '》') }
-          else if (/已存在同名笔记/.test(String(r.error || ''))) { existing += 1; lines.push('  = ' + raw + ' → 《' + noteName + '》已存在，跳过（镜像已复用）') }
-          else { lines.push('  ✗ ' + raw + ' —— ' + String(r.error || '')); if (!firstFail) firstFail = raw + '：' + String(r.error || '') }
-        }
-        emit('notes', { imported: made, root: rootId })
+        // The SAME implementation the card's RPC uses (see runFolderImport): two copies of this
+        // logic is how the RPC one kept reporting a present note as "nothing was created".
+        const r = await runFolderImport(args || {})
+        const lines = (r.created || []).map(function (c) {
+          if (c.ok && c.existing) return '  = ' + c.file + ' → 《' + c.note + '》已存在，跳过（镜像已更新）'
+          if (c.ok) return '  ✓ ' + c.file + ' → 《' + c.note + '》'
+          return '  ✗ ' + c.file + ' —— ' + c.error
+        }).join('\n')
+        return { ok: r.ok, rootId: r.rootId, assetRoot: r.assetRoot, reused: r.reused, files: r.files, bytes: r.bytes, created: lines, error: r.error }
+        })
+      },
+    }))
+    registerToolLocked(harness.defineTool({
+      name: 'note_sync',
+      description: '把一份从文件夹导入的笔记与它的**来源文件夹**重新同步：增量镜像（只复制更新的文件）+ 如果来源 .md 变过就把新正文取回来（标记会重新锚定，用户的阅读位置也会尽力保持）。用于用户在别处编辑了原始笔记、或素材文件夹里新增了图片之后。',
+      parameters: { note: { type: 'string', description: '同步哪份笔记（默认当前打开的）' } },
+      output: {
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, note: { type: 'string', required: true }, changed: { type: 'boolean', required: true }, files: { type: 'integer', required: true }, bytes: { type: 'integer', required: true }, refs: { type: 'string', required: true }, warn: { type: 'string', required: true }, error: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('《' + v.note + '》同步完成：' + (v.changed ? '正文已更新' : '正文无变化') + '；镜像 ' + v.files + ' 文件 / ' + Math.round(v.bytes / 1024) + ' KB\n' + v.refs + (v.warn ? '\n注意：' + v.warn : '')) : ('同步失败: ' + v.error) }] },
+      },
+      async execute(args, exec) {
+        return await withNoteLock(noteLockKey(), async function () {
+        await enterFromTool('note_sync', exec, { allowEmpty: true })
+        const note = args && args.note ? sanitizeNoteName(args.note) : activeNote
+        if (!note) return { ok: false, note: '', changed: false, files: 0, bytes: 0, refs: '', warn: '', error: '本会话没有打开的笔记' }
+        const r = await syncNoteFromOrigin(note)
         return {
-          ok: made > 0 || existing > 0,
-          rootId: rootId,
-          assetRoot: ASSETS_DIR + '/' + rootId,
-          reused: known !== null,
-          files: counted.files,
-          bytes: counted.bytes,
-          created: lines.join('\n'),
-          // The reason travels in `error` too: a toast with room for one line must still say what
-          // went wrong instead of "nothing was created".
-          error: (made + existing) > 0 ? '' : ('没有任何笔记被创建' + (firstFail ? ' —— ' + firstFail : '')),
+          ok: r.ok === true, note: note, changed: r.changed === true, files: intOr(r.files, 0), bytes: intOr(r.bytes, 0),
+          refs: refRender(r.refs), warn: typeof r.warn === 'string' ? r.warn : '',
+          error: r.ok ? '' : String(r.error || ''),
         }
         })
       },
