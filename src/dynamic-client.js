@@ -4546,6 +4546,12 @@ return {
             // Folder-imported notes collapse into ONE row per imported folder: a hundred and fifty flat
             // entries are unnavigable. Expanding shows the real structure — only directories that
             // actually hold notes and only .md entries, because nothing else in that folder is a note.
+            // ONCE per menu render. This block used to sit inside the per-note loop (that is where
+            // the old flat row was pushed), so a 157-note session drew the folder row — and every
+            // loose note — 157 times. The flag lives on the fresh per-render array, so it resets
+            // with every render and needs no assumption about the surrounding loop.
+            if (!items.__grouped) {
+            items.__grouped = true
             const rowOf = function (n, indent) {
               return mi('n' + n.name, n.name + '  (' + n.lines + ' 行' + (n.commitHash ? ' · ' + n.commitHash : '') + ')', n.name === noteName, function () { switchNote(n.name) }, undefined, n.gitState, indent || 0)
             }
@@ -4579,6 +4585,7 @@ return {
               })
             })
             loose.forEach(function (n) { items.push(rowOf(n, 0)) })
+            }
           }
           items.push(h('div', { className: 'dn-menu-sep', key: 's1' }))
           items.push(mi('new', '新建笔记…', false, function () { setNoteModal({ kind: 'create', name: '', text: '' }) }))
