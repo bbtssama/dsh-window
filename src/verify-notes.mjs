@@ -296,7 +296,13 @@ const rpc = async (method, args) => {
   listeners.data(Buffer.from(raw))
   listeners.end()
   await p
-  return JSON.parse(out)
+  const parsed = JSON.parse(out)
+  // An envelope-level error (the handler threw) used to surface as a bare `{}` at the call site,
+  // which reads like "the handler returned nothing" instead of "the handler blew up". Say it.
+  if (parsed && (parsed.result === undefined || parsed.result === null)) {
+    console.log('  !!! RPC ' + method + ' answered without a result: ' + JSON.stringify(parsed).slice(0, 400))
+  }
+  return parsed
 }
 const asTool = (name, args, sid) => tools.get(name).execute(args || {}, { agent: { session: sessionWith(sid, WS) } })
 const noteDirOf = (sid, name) => WS + NEST + sid + '/' + name
@@ -868,9 +874,23 @@ console.log('the asset mirror (folder import)')
   writeFile(srcDir + '/dsh-window/note/_assets/self/img/self.png', 'SELFDATA')
   // …while a plain `_assets` folder that is NOT a note space is ordinary content and must survive.
   writeFile(srcDir + '/blog/_assets/logo.svg', '<svg/>')
+  // Documents that only a RECURSIVE scan finds, plus a same-named file in another folder.
+  writeFile(srcDir + '/sub/README.md', '# 子目录的 README\n')
+  writeFile(srcDir + '/sub/deep/more.md', '# 附录\n\n## 第一章\n\n正文\n\n## 第二章\n\n更多\n')
+  // Explicit HTML anchors: these notes' tables of contents point at `<a id="…">` tags, not at
+  // heading slugs — matching headings alone found nothing and reported "没有这个标题".
+  writeFile(srcDir + '/sub/anchored.md', '# 锚点文档\n\n<a id="oop-overview"></a>\n\n## 面向对象概览\n\n内容\n')
+  // The reader's own note space inside the imported folder: never mirrored, never scanned.
+  writeFile(srcDir + '/dsh-window/note/session-x/note.md', '# 我自己的笔记\n')
 
   const scan = await r('scanFolder', { dir: srcDir })
-  ok('scanning a folder lists its markdown files', scan.ok === true && scan.files.length === 2, JSON.stringify((scan.files || []).map((f) => f.name)))
+  const rels = (scan.files || []).map((f) => f.rel)
+  ok('scanning a folder lists every .md at ANY depth, with its relative path',
+    scan.ok === true && rels.length === 6 && rels.indexOf('sub/notes.md') >= 0 && rels.indexOf('sub/deep/more.md') >= 0 && rels.indexOf('sub/anchored.md') >= 0 &&
+    (scan.files || []).filter((f) => f.rel === 'sub/deep/more.md')[0].depth === 2,
+    JSON.stringify(rels))
+  ok('the reader\'s own note space inside the folder is not offered as content',
+    rels.every((r2) => r2.indexOf('dsh-window') < 0), JSON.stringify(rels))
   // `FsDirEntry.size` is optional and the Windows backend leaves it undefined, so a listing that
   // only reads it reports every file as 0 bytes. Ask for a real number here.
   ok('the listing carries real byte sizes, not zeros',
@@ -933,6 +953,65 @@ console.log('the asset mirror (folder import)')
   ok('an absolute path is refused', abs.ok === false && /越界|相对路径/.test(String(esc.error) + String(abs.error)), String(abs.error))
   const noteDirImg = await r('asset', { path: 'note.md' })
   ok('a missing file reports the root it searched', noteDirImg.ok === false && /找不到|素材根/.test(String(noteDirImg.error)), String(noteDirImg.error))
+
+  // ── listing many documents is not enough: following their links has to work too ──────────
+  // Two folders holding a README.md used to fight over one note name (the second came back as
+  // 已存在 and its content was dropped), and a link inside a nested document resolved against the
+  // folder ROOT instead of the document's own folder.
+  const both = await asTool('note_import_folder', { dir: srcDir, files: ['README.md', 'sub/README.md'] }, SID_AS)
+  ok('two documents with the same file name become two notes (no silent loss)',
+    both.ok === true && /《README》/.test(both.created) && /《sub-README》/.test(both.created), both.created.replace(/\n/g, ' | '))
+  ok('a re-import of both is still idempotent',
+    (await asTool('note_import_folder', { dir: srcDir, files: ['README.md', 'sub/README.md'] }, SID_AS)).created.indexOf('✗') < 0)
+  // 《sub-README》 is active now, and it lives in `sub/`: its `./deep/more.md` means `sub/deep/more.md`.
+  const follow = await r('openMirrorDoc', { href: './deep/more.md' })
+  ok('a link inside a nested document resolves against THAT document\'s folder',
+    follow.ok === true && follow.note === 'more' && /sub\/deep\/more\.md$/.test(String(follow.source)), JSON.stringify(follow))
+  const moreBody = String(files.get(k(noteDirOf(SID_AS, 'more') + '/note.md')) || '')
+  ok('the document with no note yet was registered on the spot, with its own text',
+    moreBody.indexOf('## 第二章') >= 0, moreBody.slice(0, 40))
+  const moreMeta = JSON.parse(String(files.get(k(noteDirOf(SID_AS, 'more') + '/note.json')) || '{}'))
+  ok('the registered note carries the asset root and the origin it came from',
+    moreMeta.assetRoot === '_assets/' + rootId && /sub\/deep\/more\.md$/.test(String(moreMeta.origin)), JSON.stringify(moreMeta))
+  // Typora's table-of-contents links: `#第二章`, and the percent-encoded form of the same thing.
+  // 《more》 is active and lives in `sub/deep/`, so these are relative to THAT folder.
+  const anchored = await r('openMirrorDoc', { href: 'more.md#第二章' })
+  ok('a #anchor link opens the note and reports the heading\'s line',
+    anchored.ok === true && anchored.line === 7 && anchored.anchored === true, JSON.stringify(anchored))
+  const jumped = await r('state', { revision: -1 })
+  ok('the anchor becomes a real view JUMP (the card moves, not just scrolls)',
+    jumped.view && jumped.view.line === 7 && jumped.view.jump > 0, JSON.stringify(jumped.view))
+  const encoded = await r('openMirrorDoc', { href: 'more.md#%E7%AC%AC%E4%B8%80%E7%AB%A0' })
+  ok('a percent-encoded anchor (what Typora writes for CJK) lands too',
+    encoded.ok === true && encoded.line === 3, JSON.stringify(encoded))
+  const sibling = await r('openMirrorDoc', { href: '../notes.md' })
+  ok('`../notes.md` from a nested document climbs one level and registers that document',
+    sibling.ok === true && sibling.note === 'notes' && sibling.existed === false && /sub\/notes\.md$/.test(String(sibling.source)), JSON.stringify(sibling))
+  await r('selectNote', { name: 'more' })
+  const sibling2 = await r('openMirrorDoc', { href: '../notes.md' })
+  ok('and following it once more just switches back instead of making a second note',
+    sibling2.ok === true && sibling2.existed === true && sibling2.note === 'notes', JSON.stringify(sibling2))
+  const same = await r('openMirrorDoc', { href: '#附录' })
+  ok('a bare `#附录` stays in the document the reader is already in and lands on its heading',
+    same.ok === true && same.same === true && same.line === 1 && same.note === 'notes', JSON.stringify(same))
+  const noAnchor = await r('openMirrorDoc', { href: 'deep/more.md#没有这一节' })
+  ok('an anchor that does not exist opens the note anyway and says what is missing',
+    noAnchor.ok === true && noAnchor.line === 0 && /没有 #/.test(String(noAnchor.error)), JSON.stringify(noAnchor))
+  // `<a id="oop-overview"></a>` on line 3 of sub/anchored.md — the real shape of these documents.
+  const htmlAnchor = await r('openMirrorDoc', { href: 'sub/anchored.md#oop-overview' })
+  ok('an explicit `<a id="…">` anchor is found (not just heading slugs)',
+    htmlAnchor.ok === true && htmlAnchor.line === 3 && htmlAnchor.anchored === true, JSON.stringify(htmlAnchor))
+  const htmlJump = await r('state', { revision: -1 })
+  ok('and it moves the reader there',
+    htmlJump.view && htmlJump.view.line === 3 && htmlJump.view.jump > 0, JSON.stringify(htmlJump.view))
+  // An index page written relative to the FOLDER ROOT, sitting in a nested folder: the
+  // file-relative reading misses, and the root-relative one has to catch it.
+  await r('selectNote', { name: 'more' })
+  const rootWise = await r('openMirrorDoc', { href: 'sub/notes.md' })
+  ok('a root-relative link inside a nested document still resolves',
+    rootWise.ok === true && rootWise.note === 'notes' && /sub\/notes\.md$/.test(String(rootWise.source)), JSON.stringify(rootWise))
+  ok('the note space of the imported folder never reached the mirror',
+    !isFile(mirrorDir + '/dsh-window/note/session-x/note.md'), 'dsh-window/note excluded from the copy')
 
   // ── re-sync with the source folder ──────────────────────────────────────────────
   // Nothing changed at the source: the mirror must not be re-copied file by file (that is what
@@ -1003,7 +1082,7 @@ console.log('the asset mirror (folder import)')
   await r('selectNote', { name: 'README' })
   const link = await r('openMirrorDoc', { href: './sub/notes.md' })
   ok('a relative .md link opens as a note that shares the asset root',
-    link.ok === true && link.note === 'notes' && link.existed === false,
+    link.ok === true && link.note === 'notes',
     JSON.stringify({ ok: link.ok, note: link.note, existed: link.existed }))
   const linkedMeta = JSON.parse(String(files.get(k(WS + '/dsh-window/note/' + SID_AS + '/notes/note.json')) || '{}'))
   ok('the followed note shares the SAME mirror',
@@ -1012,9 +1091,13 @@ console.log('the asset mirror (folder import)')
     String(linkedMeta.origin) === srcDir + '/sub/notes.md', String(linkedMeta.origin))
   ok('the followed note has its own repository',
     gitCalls.some((c) => c.dir === k(WS + '/dsh-window/note/' + SID_AS + '/notes')), 'git init ran for it')
+  // Following it again from the SAME document (the root README) must reuse the note, not make a
+  // second one. (Following it from inside 《notes》 itself would mean `sub/sub/notes.md`, since a
+  // link is relative to the file it sits in — that is covered above.)
+  await r('selectNote', { name: 'README' })
   const again2 = await r('openMirrorDoc', { href: './sub/notes.md' })
   ok('following the same link again just switches to that note',
-    again2.ok === true && again2.existed === true, JSON.stringify({ existed: again2.existed }))
+    again2.ok === true && again2.existed === true, JSON.stringify({ ok: again2.ok, existed: again2.existed, note: again2.note, error: again2.error }))
   const outsideLink = await r('openMirrorDoc', { href: '../../../../../../etc/passwd.md' })
   ok('a link that climbs out of the mirror is refused',
     outsideLink.ok === false && /镜像里没有|越界/.test(String(outsideLink.error)), String(outsideLink.error))
