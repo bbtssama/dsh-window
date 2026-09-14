@@ -147,6 +147,8 @@ const fs = {
 
 // ── fake shell: git is a no-op, but directory operations really happen ──────────
 const gitCalls = []
+/** Added latency for `git init` only, so tests can measure whether a caller waited for git. */
+let gitDelayMs = 0
 // How many files each mirror command actually COPIED — the incremental re-sync is asserted with
 // this, because "the file is still there" cannot tell a copy from a skip.
 const copyStats = []
@@ -156,6 +158,9 @@ const shell = {
     const cmd = String(req.command || '')
     const cwd = String(req.workdir || '')
     if (cmd.startsWith('git ')) {
+      // A little latency on `init` makes "did the caller WAIT for git?" measurable: a deferred
+      // repository creation cannot be noticed by the caller, an awaited one doubles the save's time.
+      if (typeof gitDelayMs === 'number' && gitDelayMs > 0 && cmd.indexOf('init -q') >= 0) await new Promise((r) => setTimeout(r, gitDelayMs))
       gitCalls.push({ dir: k(cwd), args: cmd.slice(4) })
       if (cmd.indexOf('rev-parse --short HEAD') >= 0) return { exitCode: 0, stdout: { text: 'abc1234\n' }, stderr: { text: '' } }
       if (cmd.indexOf('rev-parse --is-inside-work-tree') >= 0) { const inside = isDir(k(cwd) + '/.git'); return { exitCode: inside ? 0 : 128, stdout: { text: inside ? 'true' : '' }, stderr: { text: inside ? '' : 'fatal: not a git repository' } } }
@@ -1157,6 +1162,20 @@ console.log('the cost of polling a session with many notes')
     bulk.ok === true && importGit === 0, importGit + ' git calls during the import')
   ok('and none of those notes has a repository yet — they get one when it is first needed',
     !isDir(k(WS + '/dsh-window/note/' + SID_P + '/丙/.git')), 'no .git before the first commit')
+  // B: a save must not WAIT for the repository — the file is written, the answer goes out, and the
+  // repository is created behind it on the git queue (that wait was the last git lag on a hot path).
+  const saveDir = k(WS + '/dsh-window/note/' + SID_P + '/丙')
+  gitDelayMs = 80
+  const tSave = Date.now()
+  const savedText = await r('saveText', { text: '# 丙\n\n改过的内容\n' })
+  const saveMs = Date.now() - tSave
+  gitDelayMs = 0
+  ok('a save never waits for git — an awaited repository creation would have cost >80ms',
+    savedText.ok === true && saveMs < 40, 'save took ' + saveMs + ' ms')
+  await new Promise(function (res) { setTimeout(res, 120) })
+  ok('and the repository lands right after it, with nobody waiting for it',
+    isDir(saveDir + '/.git'), 'no .git after the background task')
+
   // …and the commit hash is read straight out of .git, with no `git rev-parse` per note. A brand-new
   // note (never listed, so nothing is cached) proves the read path itself.
   const hashNote = k(WS + '/dsh-window/note/' + SID_P + '/哈希测试')

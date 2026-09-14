@@ -276,7 +276,16 @@ const CSS = [
 // 菜单文字挤成一团" (measured: 30 rows → row height 10px, label clipped; with this rule 25.5px and
 // the menu scrolls, 836px of content in a 332px box). Nothing here wants to shrink.
 '.dn-menu>*{flex:0 0 auto;}',
-'.dn-menu-item{border:0;background:transparent;color:inherit;text-align:left;font-size:12px;padding:5px 8px;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}',
+'.dn-menu-item{display:flex;align-items:center;gap:6px;border:0;background:transparent;color:inherit;text-align:left;font-size:12px;padding:5px 8px;border-radius:7px;cursor:pointer;white-space:nowrap;overflow:hidden;}',
+'.dn-menu-item-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;}',
+// The note rows' status light. pending breathes (CSS only — no timer, no JS, nothing on the main
+// thread); ok/error are steady. It reports BACKGROUND git work, which is the only git left.
+'.dn-git-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:rgba(0,0,0,.16);}',
+'.dn-git-pending{background:#e0a92b;animation:dn-breathe 1.3s ease-in-out infinite;}',
+'.dn-git-ok{background:#3aa860;}',
+'.dn-git-error{background:#d9534f;}',
+'@keyframes dn-breathe{0%,100%{opacity:.3;}50%{opacity:1;}}',
+'@media (prefers-reduced-motion: reduce){.dn-git-pending{animation:none;opacity:.85;}}',
 '.dn-menu-item:hover{background:rgba(79,124,255,.1);}',
 '.dn-menu-item[data-on="1"]{background:rgba(79,124,255,.14);font-weight:600;color:#2f5fd0;}',
 '.dn-menu-sep{height:1px;background:rgba(0,0,0,.1);margin:3px 4px;}',
@@ -1173,6 +1182,10 @@ return {
       // `/window-note start|stop`, so without sending this the poll kept answering "unchanged"
       // and the card only appeared after a full page reload.
       const uiRevRef = React.useRef(0)
+      // What the card last saw of the notes' background git status (the rows' status light). ECHOED
+      // to the host, exactly like uiRevision, so a background completion reaches the card without a
+      // full state answer on every poll.
+      const gitRevRef = React.useRef(-1)
       // Whether the host reports a uiRevision at all (see the poll below), plus live mirrors of
       // the two state values the poll needs (its effect has no deps, so it cannot read them).
       const hostUiRevRef = React.useRef(false)
@@ -1208,6 +1221,7 @@ return {
         lastSidRef.current = sidRef.current
         revRef.current = -1
         uiRevRef.current = 0
+        gitRevRef.current = -1
         shownNoteRef.current = ''
       }
       noteNameRef.current = noteName || ''
@@ -1403,6 +1417,7 @@ return {
         // with whatever the agent (note_lists) or another window did to them.
         if (Array.isArray(r.lists)) setListData(r.lists)
         if (typeof r.uiRevision === 'number') { uiRevRef.current = r.uiRevision; hostUiRevRef.current = true }
+        if (typeof r.gitRevision === 'number') gitRevRef.current = r.gitRevision
         // `inactive` means this store does not belong to this session (the note now
         // requires an explicit action before it participates). Clearing the state is
         // what removes the card; without it the last known note kept being rendered.
@@ -1487,6 +1502,7 @@ return {
           host.call('state', {
             revision: force ? -1 : revRef.current,
             uiRevision: uiRevRef.current,
+            gitRevision: gitRevRef.current,
             note: shownNoteRef.current,
             since: eventIdRef.current,
             sessionId: sidRef.current,
@@ -4503,11 +4519,14 @@ return {
         ]),
       ]) : null
       // ── the chrome menus: note picker, mark view, overflow actions ───────────────────
-      const mi = function (key, label, on, fn, cls) {
+      // `light` is the note row's git status dot: idle (nothing to do) / pending (git working in the
+      // background) / ok / error. It is data the poll already carries, so it costs no extra call.
+      const mi = function (key, label, on, fn, cls, light) {
+        const dot = light ? h('span', { key: 'd', className: 'dn-git-dot dn-git-' + (light === true ? 'ok' : light), title: ({ idle: '无需 git 操作', pending: 'git 正在后台处理…', ok: '已提交到它自己的仓库', error: 'git 操作失败' })[light === true ? 'ok' : light] || '' }) : null
         return h('button', {
           className: 'dn-menu-item' + (cls ? ' ' + cls : ''), key: key, type: 'button', 'data-on': on ? '1' : '0',
           onClick: function (e) { e.stopPropagation(); setMenuOpen(null); fn() },
-        }, label)
+        }, dot === null ? label : [h('span', { key: 'l', className: 'dn-menu-item-label' }, label), dot])
       }
       let menuEl = null
       if (menuOpen) {
@@ -4517,7 +4536,7 @@ return {
           if (!notes.length) items.push(h('div', { className: 'dn-menu-label', key: 'none' }, '本会话还没有笔记'))
           for (let i = 0; i < notes.length; i++) {
             const n = notes[i]
-            items.push(mi('n' + n.name, n.name + '  (' + n.lines + ' 行' + (n.commitHash ? ' · ' + n.commitHash : '') + ')', n.name === noteName, function () { switchNote(n.name) }))
+            items.push(mi('n' + n.name, n.name + '  (' + n.lines + ' 行' + (n.commitHash ? ' · ' + n.commitHash : '') + ')', n.name === noteName, function () { switchNote(n.name) }, undefined, n.gitState))
           }
           items.push(h('div', { className: 'dn-menu-sep', key: 's1' }))
           items.push(mi('new', '新建笔记…', false, function () { setNoteModal({ kind: 'create', name: '', text: '' }) }))
