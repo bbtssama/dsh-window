@@ -2130,7 +2130,7 @@ return {
         return ''
       } catch (err) { return '' }
     }
-    async function noteRow(dir, name) {
+    async function noteRow(dir, name, rootDirs) {
       const f = factsOf(dir)
       const isActive = name === activeNote
       const textV = await versionOf(dir + '/' + NOTE_FILE)
@@ -2158,6 +2158,30 @@ return {
           }
         } catch (err) { }
       }
+      // Which imported folder this note came from, and where it sits inside it: both are already in
+      // note.json. Cached by file version — no git, no subprocess, one tiny read the first time.
+      const metaV = await versionOf(dir + '/' + NOTE_META)
+      if (f.metaV !== metaV || metaV === '') {
+        f.metaV = metaV
+        f.group = ''
+        f.origin = ''
+        try {
+          const rawMeta = await readIfExists(dir + '/' + NOTE_META)
+          if (rawMeta !== null) {
+            const m = JSON.parse(rawMeta)
+            if (m && typeof m.assetRoot === 'string') f.group = m.assetRoot
+            if (m && typeof m.origin === 'string') f.origin = m.origin
+          }
+        } catch (err) { }
+      }
+      // The path inside the imported folder, computed right here so nothing has to be ordered.
+      const relPath = (function () {
+        const key = typeof f.group === 'string' ? f.group.replace(/^.*?_assets\//, '') : ''
+        const src = key !== '' && rootDirs && typeof rootDirs[key] === 'string' ? rootDirs[key].replace(/\\/g, '/').replace(/\/+$/, '') : ''
+        const org = typeof f.origin === 'string' ? f.origin.replace(/\\/g, '/') : ''
+        if (src === '' || org === '' || org.slice(0, src.length + 1) !== src + '/') return ''
+        return org.slice(src.length + 1)
+      })()
       const viewV = await versionOf(dir + '/' + VIEW_FILE)
       if (f.viewV !== viewV || viewV === '') {
         f.viewV = viewV
@@ -2197,6 +2221,9 @@ return {
         lines: intOr(f.lines, 0), bytes: intOr(f.bytes, 0),
         commitHash: typeof f.hash === 'string' ? f.hash : '',
         selections: intOr(f.selections, 0), line: intOr(f.viewLine, 0),
+        // The imported folder this note belongs to, and its path inside it (the menu's tree).
+        group: typeof f.group === 'string' ? f.group : '',
+        relPath: relPath,
       }
     }
     async function notesView() {
@@ -2204,7 +2231,17 @@ return {
       sessionNotes = names
       // In parallel: the first poll of a session pays for all the git heads at once instead of in
       // a row, and every poll after that pays nothing at all.
-      return await Promise.all(names.map(function (name) { return noteRow(sessionRoot() + '/' + name, name) }))
+      // One small read of the asset index per list, so each row can say where it sits inside the
+      // folder it came from. Same file the import already keeps up to date.
+      const rootDirs = {}
+      try {
+        const idx = await readAssetsIndex()
+        for (let i = 0; i < (idx.roots || []).length; i++) {
+          const r = idx.roots[i]
+          if (r && typeof r.id === 'string' && typeof r.source === 'string') rootDirs[r.id] = r.source
+        }
+      } catch (err) { }
+      return await Promise.all(names.map(function (name) { return noteRow(sessionRoot() + '/' + name, name, rootDirs) }))
     }
     /** The raw spawn, WITHOUT taking a queue slot. Only call this from inside a slot. */
     async function spawnGitIn(dir, args) {
@@ -2394,7 +2431,7 @@ return {
               type: 'array', required: true,
               items: {
                 type: 'object', additionalProperties: false,
-                properties: { name: { type: 'string', required: true }, active: { type: 'boolean', required: true }, lines: { type: 'integer', required: true }, bytes: { type: 'integer', required: true }, commitHash: { type: 'string', required: true }, selections: { type: 'integer', required: true }, line: { type: 'integer', required: true } },
+                properties: { name: { type: 'string', required: true }, active: { type: 'boolean', required: true }, group: { type: 'string' }, relPath: { type: 'string' }, lines: { type: 'integer', required: true }, bytes: { type: 'integer', required: true }, commitHash: { type: 'string', required: true }, selections: { type: 'integer', required: true }, line: { type: 'integer', required: true } },
               },
             },
           },
