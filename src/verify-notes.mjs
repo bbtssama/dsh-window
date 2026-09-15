@@ -713,9 +713,19 @@ sessions._m.set(SID_H, sessionWith(SID_H, WS))
   const got = await asTool('note_get_selections', {}, SID_H)
   const tool = tools.get('note_get_selections')
   const rendered = tool.output.render({}, got).map((p) => p.text).join('\n')
-  ok('the model is given the remark with the selection text',
-    rendered.indexOf('【备注】这里我总记混') >= 0 && rendered.indexOf('第二行') >= 0,
-    rendered.split('\n').slice(0, 4).join(' | '))
+  // Phase 1 of the review (§P0-1): the DEFAULT is a brief line — no remark text, no full quote. The
+  // detail:"full" door still carries both, and that is what these two assertions pin down.
+  ok('the default render is brief: the remark text and the quoted text are NOT echoed',
+    rendered.indexOf('【备注】这里我总记混') < 0 && rendered.indexOf('第二行') < 0 && rendered.indexOf('[有备注]') >= 0,
+    rendered.split('\n').slice(0, 3).join(' | '))
+  const renderedFull = tool.output.render({ detail: 'full' }, got).map((p) => p.text).join('\n')
+  ok('detail:"full" still gives the model the remark with the selection text',
+    renderedFull.indexOf('【备注】这里我总记混') >= 0 && renderedFull.indexOf('第二行') >= 0,
+    renderedFull.split('\n').slice(0, 4).join(' | '))
+  // One mark is small either way; the ratio is asserted where 30 marks are on screen (the cost section).
+  ok('and the full form never costs less than the brief one',
+    Buffer.byteLength(renderedFull, 'utf8') >= Buffer.byteLength(rendered, 'utf8'),
+    'brief ' + Buffer.byteLength(rendered, 'utf8') + ' B vs full ' + Buffer.byteLength(renderedFull, 'utf8') + ' B')
   const plain = await r('addSelection', { startLine: 3, startCol: 0, endLine: 3, endCol: 3 })
   const plainSel = ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === plain.id) || {}
   ok('a selection without a remark still reports the field as an empty string',
@@ -1684,6 +1694,84 @@ console.log('the folder picker')
   const browse = await r('pickFolder', {})
   ok('a non-native picker also explains itself', browse.ok === false && /粘贴|弹窗/.test(String(browse.error)), String(browse.error))
   pickerStub = undefined
+}
+
+console.log('the context cost of every tool call (measured, with a baseline ratchet)')
+// R5 / §7.3 of the review: what the agent actually pays for is the RENDERED text of a tool call, so
+// that is what is measured here. The ranking is printed, the total is compared against
+// src/context-cost.json, and a return body that grows fails the suite — the "省上下文" claim stops
+// being a feeling and becomes a number that can regress loudly.
+{
+  const SID_COST = 'session-cost-1111'
+  sessions._m.set(SID_COST, sessionWith(SID_COST, WS))
+  const COST_FILE = new URL('./context-cost.json', import.meta.url)
+  const bytes = (s) => Buffer.byteLength(String(s), 'utf8')
+  const rows = []
+  const call = async (name, args) => {
+    const tool = tools.get(name)
+    if (!tool) { rows.push({ name: name, bytes: -1 }); return null }
+    const value = await tool.execute(args || {}, { agent: { session: sessionWith(SID_COST, WS) } })
+    let text = ''
+    try {
+      const out = tool.output.render(args || {}, value)
+      text = (out && out[0] && out[0].text) || ''
+    } catch (err) { text = '<<render threw: ' + ((err && err.message) || String(err)) + '>>' }
+    rows.push({ name: name, bytes: bytes(text) })
+    return { value: value, text: text }
+  }
+  // A note with the volume of a real one: 30 marks is what the review measured (≈4.6 KB per echo).
+  await call('note_create', { name: '成本样本', text: '# 成本样本\n\n甲行内容\n乙行内容\n丙行内容\n' })
+  for (let i = 0; i < 30; i++) {
+    await call('note_add_selection', { startLine: 3, startCol: 0, endLine: 3, endCol: 2, color: 'yellow', remark: '备注第 ' + i + ' 条，用真实量级的备注把返回体撑起来' })
+  }
+  await call('note_get_selections', {})
+  await call('note_set_color', { id: 'sel-1', color: 'green' })
+  await call('note_set_remark', { id: 'sel-2', remark: '改过的备注' })
+  await call('note_patch', { startLine: 3, startCol: 0, endLine: 3, endCol: 1, text: '甲甲' })
+  await call('note_read', {})
+  await call('note_take_new_selections', {})
+  await call('note_list', {})
+  await call('note_diag', {})
+
+  const total = rows.reduce((n, r) => n + (r.bytes > 0 ? r.bytes : 0), 0)
+  const per = {}
+  for (const r of rows) if (r.bytes >= 0) per[r.name] = Math.max(per[r.name] || 0, r.bytes)
+  console.log('    bytes  tool (worst call)')
+  for (const r of rows.slice().sort((a, b) => b.bytes - a.bytes)) console.log('    ' + String(r.bytes).padStart(6) + '  ' + r.name)
+  console.log('    ' + String(total).padStart(6) + '  TOTAL over ' + rows.length + ' calls')
+  ok('every measured tool rendered something (the measurement itself works)',
+    rows.length > 0 && rows.every((r) => r.bytes > 0), JSON.stringify(rows.filter((r) => r.bytes <= 0)))
+  // §7.3 budgets. A mark write has no business answering with anything but its own delta; a read is
+  // exempt when it is EXPLICITLY a whole document, and cheap when it is not.
+  const BUDGET = {
+    note_add_selection: 200, note_remove_selection: 200, note_set_color: 200, note_set_remark: 200,
+    note_set_style: 200, note_clear_selections: 200, note_patch: 300, note_patch_many: 400,
+    note_read: 700, note_list: 600, note_diag: 500, note_create: 400,
+  }
+  const over = Object.keys(per).filter((k) => BUDGET[k] !== undefined && per[k] > BUDGET[k])
+  ok('every tool is inside its own return-body budget (§7.3)',
+    over.length === 0, over.map((k) => k + ' ' + per[k] + 'B > ' + BUDGET[k] + 'B').join(', '))
+  // With 30 marks on screen, brief must still be cheaper than the old full echo by an order of magnitude.
+  const briefThirty = per['note_get_selections'] || 0
+  ok('a brief listing of 30 marks costs a fraction of the old full echo (≈4.4 KB)',
+    briefThirty > 0 && briefThirty < 3300, briefThirty + ' B for 30 marks')
+
+  let base = null
+  try { base = JSON.parse(fsSync.readFileSync(COST_FILE, 'utf8')) } catch (err) { base = null }
+  if (base === null) {
+    fsSync.writeFileSync(COST_FILE, JSON.stringify({
+      note: 'Rendered return-body size per tool, measured by verify-notes.mjs (a standard mark-heavy action set). A deliberate change rewrites this file; an accidental one fails the ratchet.',
+      total: total, tools: per,
+    }, null, 2) + '\n', 'utf8')
+    console.log('    (baseline written to src/context-cost.json)')
+    ok('a baseline is recorded so the next run can ratchet', true, 'total ' + total + ' B')
+  } else {
+    const grew = Object.keys(per).filter((k) => typeof base.tools[k] === 'number' && per[k] > base.tools[k] + 150 && per[k] > base.tools[k] * 1.25)
+    ok('no tool return body grew beyond the recorded baseline',
+      grew.length === 0, grew.map((k) => k + ' ' + base.tools[k] + 'B → ' + per[k] + 'B').join(', '))
+    ok('and the standard action set as a whole did not get more expensive',
+      total <= Math.round(base.total * 1.25), 'total ' + total + ' B (baseline ' + base.total + ' B)')
+  }
 }
 
 console.log(failed === 0 ? '\nALL NOTE-MODEL CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')

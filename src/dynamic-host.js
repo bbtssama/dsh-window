@@ -1860,22 +1860,37 @@ return {
       emit('git', { hash: S.commitHash })
       return { ok: true, hash: S.commitHash, message: msg }
     }
-    function selRender(list) {
+    /**
+     * Text render of the marks. **BRIEF by default** (review §P0-1).
+     *
+     * The old form carried every mark's remark AND its full quoted text, so a write tool answered
+     * ≈4.6 KB — content the agent had just written itself, paid for twice. The brief form says what
+     * is where and how it looks, which is what a write tool needs; `detail:"full"` still exists for
+     * the rare case that wants the remark and the whole quote.
+     */
+    function selRender(list, opts) {
+      const full = !!(opts && opts.detail === 'full')
       if (!list || list.length === 0) return '（当前没有任何标记）'
       const parts = []
       for (let i = 0; i < list.length; i++) {
         const s = list[i]
-        // The colour is part of the message the agent receives: it is the intent
-        // channel (yellow focus / pink question / green done / black masked), so it
-        // has to appear in the text render, not only in the stored object.
+        // The colour is part of the message the agent receives: it is the intent channel
+        // (yellow focus / pink question / green done / black masked), so it appears in the text
+        // render, not only in the stored object.
         const flags = lookFlags(s)
-        const head = '#' + s.order + ' [' + s.id + '] ' + ({ yellow: '黄', pink: '粉', green: '绿', black: '黑', none: '无色' }[s.color] || '黄') + (flags.italic ? '·斜体' : '') + (flags.underline ? '·下划线' : '') + ' 第' + s.startLine + '行:' + s.startCol + ' → 第' + s.endLine + '行:' + s.endCol + (s.fetched ? ' （已取用）' : ' （新标记）') + (s.stale ? ' [!]原文已变动' : '')
-        // The remark is the user's own words about this passage, so it travels with the
-        // selection text into every prompt — that is the whole point of the field.
+        const head = '#' + s.order + ' [' + s.id + '] ' + ({ yellow: '黄', pink: '粉', green: '绿', black: '黑', none: '无色' }[s.color] || '黄') + (flags.italic ? '·斜体' : '') + (flags.underline ? '·下划线' : '') + ' 第' + s.startLine + '行:' + s.startCol + ' → 第' + s.endLine + '行:' + s.endCol + (s.fetched ? ' （已取用）' : ' （新标记）') + (s.stale ? ' [!]原文已变动' : '') + (typeof s.remark === 'string' && s.remark !== '' ? ' [有备注]' : '')
+        const text = String(s.text === undefined || s.text === null ? '' : s.text)
+        if (!full) {
+          // One short preview: enough to recognise the passage without paying for it again.
+          const first = text.split('\n')[0]
+          const moreLines = text.indexOf('\n') >= 0 ? ('  (共 ' + text.split('\n').length + ' 行)') : ''
+          parts.push(head + '\n    ' + (first.length > 30 ? first.slice(0, 30) + '…' : first) + moreLines)
+          continue
+        }
         const remark = typeof s.remark === 'string' && s.remark !== '' ? '\n  【备注】' + s.remark.split('\n').join('\n  ') : ''
-        parts.push(head + remark + '\n' + s.text.split('\n').map(function (l) { return '    ' + l }).join('\n'))
+        parts.push(head + remark + '\n' + text.split('\n').map(function (l) { return '    ' + l }).join('\n'))
       }
-      return parts.join('\n\n')
+      return parts.join('\n')
     }
     /** Text render of the "reference → hit" table: what the card will be able to show. */
     function refRender(refs) {
@@ -2367,14 +2382,32 @@ return {
     }
     registerToolLocked(harness.defineTool({
       name: 'note_get_selections',
-      description: '读取笔记卡片里用户做过的全部标记(按正文先后排序的对象数组)。每项含 id、序号 order、起止行/列(1 基行号、0 基列号)、选中时间 createdAt、原文 text、是否已被取用过 fetched、原文是否已变动 stale。',
-      parameters: { includeText: { type: 'boolean', description: '是否返回原文 text，默认 true。' }, note: { type: 'string', description: '要看哪一份笔记（默认当前打开的；指定别的名字不会切换卡片）' } },
-      output: { schema: { type: 'array', items: SEL_ITEM }, render: function (a, v) { return [{ type: 'text', text: selRender(v) }] } },
+      description: '读取笔记卡片里的标记（按正文先后排序）。默认 **brief**：每条一行给 id/序号/颜色/样式/行范围/状态 + 前 30 字预览；需要备注与原文全文时传 detail:"full"，或先用 ids 缩小范围再取全文。',
+      parameters: {
+        detail: { type: 'string', enum: ['brief', 'full'], description: 'brief（默认）只给状态与前 30 字；full 附带备注与原文全文。' },
+        ids: { type: 'array', items: { type: 'string' }, description: '只看这几条（例如 ["sel-3","sel-7"]）。' },
+        includeText: { type: 'boolean', description: '（旧参数）false 时清空 text 字段，默认 true。' },
+        note: { type: 'string', description: '要看哪一份笔记（默认当前打开的；指定别的名字不会切换卡片）' },
+      },
+      output: {
+        schema: { type: 'array', items: SEL_ITEM },
+        render: function (a, v) {
+          const full = !!((a && a.detail) === 'full')
+          if (!v.length) return [{ type: 'text', text: '（当前没有任何标记）' }]
+          const head = v.length + ' 条标记' + (full ? '（含备注与原文）' : '（brief —— 要备注/原文用 detail:"full"）')
+          return [{ type: 'text', text: head + ':\n' + selRender(v, { detail: full ? 'full' : 'brief' }) }]
+        },
+      },
       async execute(args, exec) {
         await enterFromTool('note_get_selections', exec)
         return await useNote(args && args.note, async function () {
         markTouched()
-        const list = viewSelections()
+        let list = viewSelections()
+        if (args && Array.isArray(args.ids) && args.ids.length) {
+          const want = {}
+          for (let i = 0; i < args.ids.length; i++) want[String(args.ids[i])] = true
+          list = list.filter(function (s) { return want[s.id] === true })
+        }
         if (args && args.includeText === false) return list.map(function (s) { return Object.assign({}, s, { text: '' }) })
         return list
         })
@@ -2382,9 +2415,12 @@ return {
     }))
     registerToolLocked(harness.defineTool({
       name: 'note_take_new_selections',
-      description: '领取用户自上次领取之后新划选的内容(只返回 fetched=false 的对象，并立即把它们标记为已取用，避免重复返回)。回答用户问题前应先调用它，看看用户新划了哪些重点。',
+      description: '领取用户自上次领取之后新划选的内容（只返回尚未取用的标记，并立即标记为已取用）。回答用户问题前先调用它。返回默认 brief；要某几条的备注与原文用 note_get_selections({ids, detail:"full"})。',
       parameters: { note: { type: 'string', description: '取哪一份笔记的新标记（默认当前打开的）' } },
-      output: { schema: { type: 'array', items: SEL_ITEM }, render: function (a, v) { return [{ type: 'text', text: v.length ? ('用户新选中了 ' + v.length + ' 段:\n\n' + selRender(v)) : '(没有新的选中内容)' }] } },
+      output: {
+        schema: { type: 'array', items: SEL_ITEM },
+        render: function (a, v) { return [{ type: 'text', text: v.length ? ('用户新选中了 ' + v.length + ' 段:\n' + selRender(v)) : '(没有新的选中内容)' }] },
+      },
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_take_new_selections', exec)
@@ -2406,18 +2442,19 @@ return {
     }))
     registerToolLocked(harness.defineTool({
       name: 'note_read',
-      description: '读取笔记卡片当前正文(磁盘文件 note.md 的实时内容)。返回内容带行号，方便与选中对象的行号对应;也包含选中内容概览。',
-      parameters: { withLineNumbers: { type: 'boolean', description: '是否在正文前加行号，默认 true。' }, note: { type: 'string', description: '要看哪一份笔记（默认当前打开的；指定别的名字不会切换卡片）' }, fromLine: { type: 'integer', description: '只读这一段的第一行(1 基，含)。省略则从头。' }, toLine: { type: 'integer', description: '读到这一行(1 基，含)。省略则到底。' }, padding: { type: 'integer', description: '上下各多读几行，默认 0。' } },
+      description: '读取笔记正文(磁盘 note.md 的实时内容)，带行号。要定位某段先用 note_find，再用 fromLine/toLine 开窗（省上下文）；只有明确需要通读时才整篇读。默认不附标记概览（detail 控制）。',
+      parameters: { withLineNumbers: { type: 'boolean', description: '是否在正文前加行号，默认 true。' }, note: { type: 'string', description: '要看哪一份笔记（默认当前打开的；指定别的名字不会切换卡片）' }, fromLine: { type: 'integer', description: '只读这一段的第一行(1 基，含)。省略则从头。' }, toLine: { type: 'integer', description: '读到这一行(1 基，含)。省略则到底。' }, padding: { type: 'integer', description: '上下各多读几行，默认 0。' }, detail: { type: 'string', enum: ['none', 'brief', 'full'], description: '标记概览的详细度：默认 none（不附标记，需要时用 note_get_selections）；brief 附简要列表；full 附备注与原文。' } },
       output: {
         schema: {
           type: 'object', additionalProperties: false,
-          properties: { path: { type: 'string', required: true }, lineCount: { type: 'integer', required: true }, fromLine: { type: 'integer', required: true }, toLine: { type: 'integer', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true }, text: { type: 'string', required: true }, viewLine: { type: 'integer', required: true } },
+          properties: { path: { type: 'string', required: true }, lineCount: { type: 'integer', required: true }, fromLine: { type: 'integer', required: true }, toLine: { type: 'integer', required: true }, revision: { type: 'integer', required: true }, marks: { type: 'string', required: true }, text: { type: 'string', required: true }, viewLine: { type: 'integer', required: true } },
         },
         render: function (a, v) {
           const numbered = v.text.split('\n').map(function (l, i) { return ('    ' + String(i + v.fromLine)).slice(-5) + '| ' + l }).join('\n')
           const range = (v.fromLine === 1 && v.toLine === v.lineCount) ? '' : (' 第 ' + v.fromLine + '-' + v.toLine + ' 行')
           const where = v.viewLine ? ('\n用户当前读到: 第 ' + v.viewLine + ' 行') : ''
-          return [{ type: 'text', text: '笔记文件: ' + v.path + (range ? range : '') + ' (共 ' + v.lineCount + ' 行)' + where + '\n\n' + numbered + '\n\n--- 标记概览 ---\n' + v.selections }]
+          const marks = v.marks ? ('\n\n--- 标记概览 ---\n' + v.marks) : ''
+          return [{ type: 'text', text: '笔记文件: ' + v.path + (range ? range : '') + ' (共 ' + v.lineCount + ' 行)' + where + '\n\n' + numbered + marks }]
         },
       },
       async execute(args, exec) {
@@ -2433,7 +2470,9 @@ return {
           to = Math.min(all.length, intOr(a.toLine, all.length) + pad)
           if (to < from) to = from
         }
-        return { path: paths().note, lineCount: all.length, fromLine: from, toLine: to, revision: S.revision, selections: selRender(viewSelections()), text: all.slice(from - 1, to).join('\n'), viewLine: S.view && Number.isFinite(Number(S.view.line)) ? Math.max(1, Math.round(Number(S.view.line))) : 0 }
+        const mode = a.detail === 'full' || a.detail === 'brief' ? a.detail : 'none'
+        const marks = mode === 'none' ? '' : selRender(viewSelections(), { detail: mode === 'full' ? 'full' : 'brief' })
+        return { path: paths().note, lineCount: all.length, fromLine: from, toLine: to, revision: S.revision, marks: marks, text: all.slice(from - 1, to).join('\n'), viewLine: S.view && Number.isFinite(Number(S.view.line)) ? Math.max(1, Math.round(Number(S.view.line))) : 0 }
         })
       },
     }))
@@ -3557,9 +3596,13 @@ return {
               '这个会话的界面右侧可能悬浮着一张 Markdown 笔记卡片，它是**本会话私有**的：正文在 `' + ROOT_DIR + '/' + NOTES_DIR + '/<本会话id>/<笔记名>/' + NOTE_FILE + '`，每份笔记各自受 git 管理，其他会话看不到。用 note_list 看本会话有哪些笔记。',
               '{{dsh_window_note_scope}}',
               '工作方式(仅当你归属于这张卡片时适用):',
-              '- 用户问知识性问题、要求讲解/总结/整理时，不要只在对话里长篇回复: 用 `note_write`(默认追加)把讲解写进笔记，内容会立刻显示在卡片里，用户就不必往上翻聊天记录。对话里只留简短的口头交付与要点提示。',
-              '- 每次回答用户之前，先调用 `note_take_new_selections`: 它返回用户自上次取用以来新标记的重点(含行号与原文)，并把这些对象标记为已取用。用户标记往往就是"这里我不懂/我要你展开"。',
-              '- 需要回顾全部标记时用 `note_get_selections`; 需要笔记全文(含行号)时用 `note_read`，也可以直接用 `read` 工具读该文件。',
+              '- 【省上下文铁律 · 读笔记前必做】',
+              '  ① 先 `note_diag`/`note_list` 看 rev、行数与当前状态，没有改动就不要读正文；',
+              '  ② 读正文优先 `note_find` 定位 + `note_read({fromLine,toLine,padding})` 开窗，禁止无差别整篇读；',
+              '  ③ 只有明确需要通读时才整篇读，并在回复里说明理由；',
+              '  ④ 不要绕过插件用通用读文件工具直接读 note.md（那会丢掉行号对齐与增量能力）。',
+              '- 回答用户前先 `note_take_new_selections` 取用户新标记：它给出用户自上次取用后新划的重点（id/行范围/颜色 + 前 30 字预览，已取用的不重复给）。用户标记往往就是"这里我不懂/我要你展开"。',
+              '- 标记默认 **brief**：`note_get_selections` 每条只给 id/行范围/颜色/样式/状态 + 前 30 字；要看某几条的备注与原文时用 `note_get_selections({ids:["sel-3"], detail:"full"})`，不要为了两条把全部标记的全文拉回来。',
               '- 用户在卡片里手动编辑会立刻落盘; 点"保存"按钮会 git 提交。你写入后默认也会自动提交一次。',
               '- 卡片支持图片：`![alt](./x.png)` 这类本地相对路径会由 host 读成 data URL 渲染；在线 http(s) 图片直接渲染。引用整张图时，选中范围会自动吸附到整段图片语法。',
               '- 代码块按语言做语法高亮；`mermaid` 代码块会渲染成图（支持 graph/flowchart 的 TD/TB/LR/RL 分层图），其余图种降级为源码卡片。',
@@ -3646,12 +3689,12 @@ return {
     }
     const PATCH_SCHEMA = {
       type: 'object', additionalProperties: false,
-      properties: { ok: { type: 'boolean', required: true }, changed: { type: 'boolean', required: true }, removed: { type: 'integer', required: true }, inserted: { type: 'integer', required: true }, revision: { type: 'integer', required: true }, lineCount: { type: 'integer', required: true }, selections: { type: 'string', required: true }, error: { type: 'string', required: true } },
+      properties: { ok: { type: 'boolean', required: true }, changed: { type: 'boolean', required: true }, removed: { type: 'integer', required: true }, inserted: { type: 'integer', required: true }, revision: { type: 'integer', required: true }, lineCount: { type: 'integer', required: true }, marks: { type: 'integer', required: true }, error: { type: 'string', required: true } },
     }
     function patchRender(a, v) {
       if (!v.ok) return [{ type: 'text', text: '失败: ' + v.error }]
       if (!v.changed) return [{ type: 'text', text: '无变化（区间内容与替换文本相同）' }]
-      return [{ type: 'text', text: '已改写: -' + v.removed + ' +' + v.inserted + ' 字符，现 ' + v.lineCount + ' 行 (rev ' + v.revision + ')\n\n' + v.selections }]
+      return [{ type: 'text', text: '已改写: -' + v.removed + ' +' + v.inserted + ' 字符，现 ' + v.lineCount + ' 行，标记 ' + v.marks + ' 条 (rev ' + v.revision + ')' }]
     }
     const RANGE_PARAMS = {
       startLine: { type: 'integer', required: true, description: '起始行（1 基）' },
@@ -3676,15 +3719,15 @@ return {
         remark: { type: 'string', description: '这条标记的备注（可空）。用户自己写的备注也在这个字段里。' },
       },
       output: {
-        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, revision: { type: 'integer', required: true }, reason: { type: 'string', required: true }, selections: { type: 'string', required: true } } },
-        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已新建标记 ' + v.id + ' (rev ' + v.revision + ')\n\n' + v.selections) : ('未新建: ' + (v.reason === 'empty' ? '该区间为空' : v.reason)) }] },
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, id: { type: 'string', required: true }, revision: { type: 'integer', required: true }, marks: { type: 'integer', required: true }, reason: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已新建标记 ' + v.id + ' (rev ' + v.revision + ', 标记 ' + v.marks + ' 条)') : ('未新建: ' + (v.reason === 'empty' ? '该区间为空' : v.reason)) }] },
       },
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_add_selection', exec); markTouched()
         const a = args || {}
         const r = await addSelection(Object.assign({}, a, { color: colorOf(a.color), italic: a.italic === true || styleWants(a.style).italic, underline: a.underline === true || styleWants(a.style).underline }))
-        return { ok: r.ok === true, id: r.ok ? r.id : '', revision: S.revision, reason: r.ok ? '' : String(r.reason || ''), selections: selRender(viewSelections()) }
+        return { ok: r.ok === true, id: r.ok ? r.id : '', revision: S.revision, marks: S.selections.length, reason: r.ok ? '' : String(r.reason || '') }
         })
       },
     }))
@@ -3693,8 +3736,8 @@ return {
       description: '删除一条标记（按 id，id 来自 note_get_selections）。',
       parameters: { id: { type: 'string', required: true, description: '标记 id，如 sel-9' } },
       output: {
-        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, removed: { type: 'boolean', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true } } },
-        render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.removed ? '已删除 ' + a.id : '未找到 ' + a.id) : '失败') + ' (rev ' + v.revision + ')\n\n' + v.selections }] },
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, removed: { type: 'boolean', required: true }, revision: { type: 'integer', required: true }, marks: { type: 'integer', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.removed ? '已删除 ' + a.id : '未找到 ' + a.id) : '失败') + ' (rev ' + v.revision + ', 标记 ' + v.marks + ' 条)' }] },
       },
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
@@ -3704,7 +3747,7 @@ return {
         S.selections = S.selections.filter(function (x) { return x.id !== id })
         const removed = S.selections.length !== before
         if (removed) { S.revision += 1; if (canWrite()) { try { await persistState() } catch (err) { fail('写入选中记录', err) } } }
-        return { ok: true, removed: removed, revision: S.revision, selections: selRender(viewSelections()) }
+        return { ok: true, removed: removed, revision: S.revision, marks: S.selections.length }
         })
       },
     }))
@@ -3731,8 +3774,8 @@ return {
       description: '修改一个标记的底色：yellow / pink / green / black / none（none = 完全不铺底色，只保留斜体/下划线样式）。可用它把已处理的标记转成绿色、或把要屏蔽的区间涂黑。',
       parameters: { id: { type: 'string', required: true, description: '标记 id' }, color: { type: 'string', required: true, description: 'yellow / pink / green / black / none' } },
       output: {
-        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, found: { type: 'boolean', required: true }, color: { type: 'string', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true } } },
-        render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.found ? ('已把 ' + a.id + ' 改为 ' + v.color) : ('未找到 ' + a.id)) : '失败') + ' (rev ' + v.revision + ')\n\n' + v.selections }] },
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, found: { type: 'boolean', required: true }, color: { type: 'string', required: true }, revision: { type: 'integer', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.found ? ('已把 ' + a.id + ' 改为 ' + v.color) : ('未找到 ' + a.id)) : '失败') + ' (rev ' + v.revision + ')' }] },
       },
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
@@ -3742,7 +3785,7 @@ return {
         let found = false
         for (let i = 0; i < S.selections.length; i++) if (S.selections[i].id === String(a.id || '')) { if (S.selections[i].color !== c) { S.selections[i].color = c; found = true } }
         if (found) { S.revision += 1; if (canWrite()) { try { await persistState() } catch (err) { fail('写入选中记录', err) } } }
-        return { ok: true, found: found, color: c, revision: S.revision, selections: selRender(viewSelections()) }
+        return { ok: true, found: found, color: c, revision: S.revision }
         })
       },
     }))
@@ -3756,8 +3799,8 @@ return {
         style: { type: 'string', description: '（旧写法）highlight / italic / underline / both —— 一次设定两个开关。' },
       },
       output: {
-        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, found: { type: 'boolean', required: true }, style: { type: 'string', required: true }, italic: { type: 'boolean', required: true }, underline: { type: 'boolean', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true } } },
-        render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.found ? ('已把 ' + a.id + ' 的样式改为 ' + v.style + '（斜体=' + (v.italic ? '开' : '关') + ' 下划线=' + (v.underline ? '开' : '关') + '）') : ('未找到 ' + a.id)) : '失败') + ' (rev ' + v.revision + ')\n\n' + v.selections }] },
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, found: { type: 'boolean', required: true }, style: { type: 'string', required: true }, italic: { type: 'boolean', required: true }, underline: { type: 'boolean', required: true }, revision: { type: 'integer', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: (v.ok ? (v.found ? ('已把 ' + a.id + ' 的样式改为 ' + v.style + '（斜体=' + (v.italic ? '开' : '关') + ' 下划线=' + (v.underline ? '开' : '关') + '）') : ('未找到 ' + a.id)) : '失败') + ' (rev ' + v.revision + ')' }] },
       },
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
@@ -3768,7 +3811,7 @@ return {
         if (a.underline === true || a.underline === false) patch.underline = a.underline
         if (typeof a.style === 'string' && a.style !== '') patch.style = a.style
         const r = await setMarkLook(a.id, patch)
-        return { ok: r.ok === true, found: r.found === true, style: typeof r.style === 'string' ? r.style : '', italic: r.italic === true, underline: r.underline === true, revision: S.revision, selections: selRender(viewSelections()) }
+        return { ok: r.ok === true, found: r.found === true, style: typeof r.style === 'string' ? r.style : '', italic: r.italic === true, underline: r.underline === true, revision: S.revision }
         })
       },
     }))
@@ -3780,10 +3823,11 @@ return {
         remark: { type: 'string', required: true, description: '备注内容；空字符串表示清除。' },
       },
       output: {
-        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, found: { type: 'boolean', required: true }, id: { type: 'string', required: true }, remark: { type: 'string', required: true }, revision: { type: 'integer', required: true }, selections: { type: 'string', required: true }, error: { type: 'string', required: true } } },
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, found: { type: 'boolean', required: true }, id: { type: 'string', required: true }, remark: { type: 'string', required: true }, revision: { type: 'integer', required: true }, error: { type: 'string', required: true } } },
         render: function (a, v) {
-          const what = v.remark === '' ? '已清除备注' : ('已写备注「' + v.remark + '」')
-          return [{ type: 'text', text: (v.ok ? (what + ' → ' + v.id) : ('失败: ' + v.error)) + ' (rev ' + v.revision + ')\n\n' + v.selections }]
+          const cut = String(v.remark || '')
+          const what = cut === '' ? '已清除备注' : ('已写备注「' + (cut.length > 20 ? cut.slice(0, 20) + '…' : cut) + '」')
+          return [{ type: 'text', text: (v.ok ? (what + ' → ' + v.id) : ('失败: ' + v.error)) + ' (rev ' + v.revision + ')' }]
         },
       },
       async execute(args, exec) {
@@ -3793,7 +3837,7 @@ return {
           const r = await setRemark(a.id, a.remark)
           return {
             ok: r.ok === true, found: r.found === true, id: String(a.id || ''), remark: typeof r.remark === 'string' ? r.remark : '',
-            revision: r.revision, selections: selRender(r.selections), error: r.ok ? '' : String(r.error || ''),
+            revision: r.revision, error: r.ok ? '' : String(r.error || ''),
           }
         })
       },
@@ -4051,9 +4095,9 @@ return {
         return await withNoteLock(noteLockKey(), async function () {
         await enterFromTool('note_patch', exec); markTouched()
         const r = applyPatch(args || {})
-        if (!r.changed) return { ok: true, changed: false, removed: 0, inserted: 0, revision: S.revision, lineCount: linesOf(S.text).length, selections: selRender(viewSelections()), error: '' }
+        if (!r.changed) return { ok: true, changed: false, removed: 0, inserted: 0, revision: S.revision, lineCount: linesOf(S.text).length, marks: S.selections.length, error: '' }
         const wrote = await flushAfterWrite()
-        return { ok: wrote, changed: true, removed: r.removed, inserted: r.inserted, revision: S.revision, lineCount: linesOf(S.text).length, selections: selRender(viewSelections()), error: wrote ? '' : S.error }
+        return { ok: wrote, changed: true, removed: r.removed, inserted: r.inserted, revision: S.revision, lineCount: linesOf(S.text).length, marks: S.selections.length, error: wrote ? '' : S.error }
         })
       },
     }))
@@ -4067,8 +4111,8 @@ return {
         },
       },
       output: {
-        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, applied: { type: 'integer', required: true }, changed: { type: 'boolean', required: true }, removed: { type: 'integer', required: true }, inserted: { type: 'integer', required: true }, revision: { type: 'integer', required: true }, lineCount: { type: 'integer', required: true }, selections: { type: 'string', required: true }, error: { type: 'string', required: true } } },
-        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已应用 ' + v.applied + ' 处改写: -' + v.removed + ' +' + v.inserted + ' 字符，现 ' + v.lineCount + ' 行 (rev ' + v.revision + ')\n\n' + v.selections) : ('失败: ' + v.error) }] },
+        schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, applied: { type: 'integer', required: true }, changed: { type: 'boolean', required: true }, removed: { type: 'integer', required: true }, inserted: { type: 'integer', required: true }, revision: { type: 'integer', required: true }, lineCount: { type: 'integer', required: true }, marks: { type: 'integer', required: true }, error: { type: 'string', required: true } } },
+        render: function (a, v) { return [{ type: 'text', text: v.ok ? ('已应用 ' + v.applied + ' 处改写: -' + v.removed + ' +' + v.inserted + ' 字符，现 ' + v.lineCount + ' 行，标记 ' + v.marks + ' 条 (rev ' + v.revision + ')') : ('失败: ' + v.error) }] },
       },
       async execute(args, exec) {
         return await withNoteLock(noteLockKey(), async function () {
@@ -4083,7 +4127,7 @@ return {
           if (r.changed) { changed = true; removed += r.removed; inserted += r.inserted }
         }
         const wrote = changed ? await flushAfterWrite() : true
-        return { ok: wrote, applied: applied, changed: changed, removed: removed, inserted: inserted, revision: S.revision, lineCount: linesOf(S.text).length, selections: selRender(viewSelections()), error: wrote ? '' : S.error }
+        return { ok: wrote, applied: applied, changed: changed, removed: removed, inserted: inserted, revision: S.revision, lineCount: linesOf(S.text).length, marks: S.selections.length, error: wrote ? '' : S.error }
         })
       },
     }))
