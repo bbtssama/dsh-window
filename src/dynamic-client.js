@@ -3552,7 +3552,12 @@ return {
           const key = 'b' + bi
           if (editBlock && b.line === editBlock.from) {
             out.push(h('textarea', {
-              className: 'dn-blk-editor', key: key, ref: blockEditorRef, value: editBlock.value,
+              // UNCONTROLLED on purpose: the card re-renders on every poll (~0.7s), and a controlled
+              // value taken from a render-time snapshot reset the textarea to that snapshot on each of
+              // them — you could type and delete, but what you typed was wiped before you could see it
+              // ("能正常输入和删除但是显示有问题"). The buffer lives in editBlockRef, which the commit
+              // reads, so nothing here needs to be controlled.
+              className: 'dn-blk-editor', key: key, ref: blockEditorRef, defaultValue: editBlock.value,
               rows: Math.min(30, Math.max(1, editBlock.value.split(String.fromCharCode(10)).length + 1)),
               onChange: function (ev) {
                 const nb = Object.assign({}, editBlockRef.current, { value: ev.target.value })
