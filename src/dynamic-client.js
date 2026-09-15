@@ -1894,19 +1894,34 @@ return {
         if (!body) return null
         const o = bodyOrigin()
         const x = clientX - o.left, y = clientY - o.top
-        let pick = null, pickScore = 1e12
-        const bands = lineBands().bands
-        for (let i = 0; i < bands.length; i++) {
-          const b = bands[i]
-          const score = (y >= b.top && y <= b.bottom) ? (-1 - 1 / (1 + (b.bottom - b.top))) : (y < b.top ? (b.top - y) : (y - b.bottom))
-          if (score < pickScore) { pickScore = score; pick = b.line }
+        let pick = null
+        // Ask the DOM FIRST: the element actually under the cursor carries data-line, so the answer
+        // cannot be poisoned by a stale band cache. The cache is keyed by the card's geometry only,
+        // so content that grows AFTER it was measured (an image finishing, a table expanding) moved
+        // every line below it while the bands stayed behind — a click on 六、可视化 landed on 四、
+        // and a double-click there entered the editor at the wrong place.
+        const hitEl = (typeof document !== 'undefined' && document.elementFromPoint) ? document.elementFromPoint(clientX, clientY) : null
+        if (hitEl && body.contains(hitEl)) {
+          let el = hitEl
+          while (el && el !== body && !(el.getAttribute && el.getAttribute('data-line') !== null)) el = el.parentElement
+          if (el && el !== body) {
+            const ln = Number(el.getAttribute('data-line'))
+            if (Number.isFinite(ln) && ln >= 1) pick = ln
+          }
         }
-        if (pick === null) return null
-        // Dead space (gaps between blocks, the body's bottom padding) must not
-        // snap the caret onto whatever line happens to be nearest: a long press
-        // there used to select a word far away. Within a line height of the text
-        // the press still clamps to that line as before.
-        if (pickScore > 120) return null
+        if (pick === null) {
+          // Dead space (gaps between blocks, the body's bottom padding): fall back to the band
+          // lookup, whose dead-space rule keeps a long press in a gap from snapping onto a far line.
+          let pickScore = 1e12
+          const bands = lineBands().bands
+          for (let i = 0; i < bands.length; i++) {
+            const b = bands[i]
+            const score = (y >= b.top && y <= b.bottom) ? (-1 - 1 / (1 + (b.bottom - b.top))) : (y < b.top ? (b.top - y) : (y - b.bottom))
+            if (score < pickScore) { pickScore = score; pick = b.line }
+          }
+          if (pick === null) return null
+          if (pickScore > 120) return null
+        }
         const cells = cellsOf(pick).cells
         if (!cells.length) return { line: pick, col: 0 }
         let lo = 0, hi = cells.length
