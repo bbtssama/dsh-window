@@ -2780,13 +2780,18 @@ return {
           if (found) line = found
           else { pendingViewRef.current = null; return }
         }
-        const bands = lineBands().byLine
+        // Measure the target LIVE from the DOM, never from the cached bands. That cache is keyed by
+        // the card geometry, so it goes stale the moment content above grows (an image finishing, a
+        // table changing height, a block leaving edit mode) and the computed offset then points tens
+        // of lines too far: the toast says 已跳到第 211 行 and the card shows 7.1. The hit test was
+        // fixed this way (9377797); this path still trusted the cache.
         let top = null
+        const hostRect = host.getBoundingClientRect()
         for (let probe = line; probe <= Math.min(lines.length, line + 30) && top === null; probe++) {
-          const b = bands[probe]
-          if (b) { top = b.top; break }
           const el = lineEls.current[probe]
-          if (el && el.isConnected) { const rec = cellsOf(probe); if (rec && rec.rect) top = rec.rect.top }
+          if (!el || !el.isConnected) continue
+          const r = el.getBoundingClientRect()
+          if (r.height > 0) top = host.scrollTop + (r.top - hostRect.top)
         }
         if (top === null) {
           // Not measured yet (the blocks render before the bands exist). Give the geometry
