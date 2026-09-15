@@ -1310,6 +1310,9 @@ console.log('the back/forward history (a pure function, so it can be tested at a
     ok('coming back to the entry the cursor already points at adds no duplicate',
       (() => { const base = { list: s.list, at: 0 }; return nav.push(base, '丙', 0) === base })(),
       'same name')
+    ok('a new visit after 后退 drops what was ahead of the cursor (前进 must not resurrect it)',
+      (() => { const f = nav.push({ list: s.list, at: 0 }, '庚', 0); return f.list.length === 2 && f.at === 1 && f.list[1].name === '庚' })(),
+      JSON.stringify(s.list.map((e) => e.name)))
     let many = nav.push(empty(), '戊', 0)
     for (let i = 0; i < 60; i++) many = nav.jump(many, '戊', i + 1, i)
     ok('the history is capped at 50 entries and the cursor follows the newest',
