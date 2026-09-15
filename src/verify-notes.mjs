@@ -1245,7 +1245,8 @@ console.log('the note menu tree (a pure function, so it can be tested at all)')
     openDir.some((r) => r.kind === 'note' && r.note.name === 'C') &&
     !openDir.some((r) => r.kind === 'note' && r.note.name === 'A'),
     'two levels')
-  const deepKey = (openDir.filter((r) => r.kind === 'dir')[0] || {}).key
+  // The DEEPEST directory, not the first one: the first is the directory we just opened.
+  const deepKey = openDir.filter((r) => r.kind === 'dir').sort((a, b) => b.depth - a.depth)[0].key
   const fully = build(deep, { [folderKey]: true, [dirKey]: true, [deepKey]: true })
   ok('opening every level finally lists the deepest notes, indented deeper than the shallower one',
     fully.some((r) => r.kind === 'note' && r.note.name === 'A') &&
