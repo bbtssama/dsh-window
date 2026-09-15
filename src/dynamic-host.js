@@ -1174,10 +1174,15 @@ return {
     async function saveNavStore(input) {
       const a = input || {}
       const list = cleanNavList(a.list)
-      nav = list.length === 0 ? null : { list: list, at: Math.min(Math.max(0, intOr(a.at, 0)), list.length - 1), updatedAt: Date.now() }
-      if (fs === undefined || !canWrite() || !sessionId) return { ok: true, entries: nav ? nav.list.length : 0 }
+      // An EMPTY list means "nothing to say", never "forget the stack". A client whose own stack is
+      // still empty (a page load, before its state answer has been adopted) used to send exactly that
+      // and erase the saved stack on every refresh; the host refuses to be the weak link here, so the
+      // stored stack survives any such write.
+      if (list.length === 0) return { ok: true, ignored: true, entries: nav ? nav.list.length : 0, at: nav ? nav.at : -1 }
+      nav = { list: list, at: Math.min(Math.max(0, intOr(a.at, 0)), list.length - 1), updatedAt: Date.now() }
+      if (fs === undefined || !canWrite() || !sessionId) return { ok: true, entries: nav.list.length }
       try { await writeAt(sessionStatePath(), JSON.stringify(sessionStatePayload(), null, 2) + '\n') } catch (err) { fail('写入进退栈', err) }
-      return { ok: true, entries: nav ? nav.list.length : 0, at: nav ? nav.at : -1 }
+      return { ok: true, entries: nav.list.length, at: nav.at }
     }
     async function readSessionState() {
       if (!sessionId) return

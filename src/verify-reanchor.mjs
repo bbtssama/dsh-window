@@ -353,6 +353,14 @@ for (let i = 0; i < 60; i++) many.push({ name: 'n' + i, line: i + 1 })
 const capped = await rpc('saveNav', { sessionId: SID, list: many, at: 999 })
 ok('a name that could escape the session subtree is dropped and the list is capped at 50',
   capped.result && capped.result.ok === true && capped.result.entries === 50, JSON.stringify(capped.result))
+// The reported bug, exactly: on every page load the card's own stack is empty until the state answer
+// hands the saved one back, and it used to write that emptiness out — erasing the stack every refresh.
+const emptyWrite = await rpc('saveNav', { sessionId: SID, list: [], at: -1 })
+const afterEmpty = await rpc('state', { revision: -1, sessionId: SID })
+ok('an EMPTY stack never erases what the host already keeps',
+  emptyWrite.result && emptyWrite.result.ok === true && emptyWrite.result.ignored === true &&
+  afterEmpty.result.nav && afterEmpty.result.nav.list.length === 50,
+  JSON.stringify({ write: emptyWrite.result, kept: afterEmpty.result.nav && afterEmpty.result.nav.list.length }))
 
 // A jump is an EVENT: the nonce alone cannot tell the card "this happened while you were watching",
 // which is what let a stale nonce push a phantom entry (and wipe a recorded line) on every return.

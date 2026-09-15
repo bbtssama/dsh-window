@@ -1307,6 +1307,12 @@ return {
       }
       function saveNavNow() {
         const live = String(navSidRef.current || '')
+        // An EMPTY stack is "nothing to say yet", never "forget everything": on a page load the card's
+        // own stack IS empty until the state answer hands the saved one back, and writing that
+        // emptiness out is what erased the persisted stack on every single refresh — the state answer
+        // then carried `nav: null`, so the saved stack was never adopted and the 后退/前进 menu came up
+        // empty. Only a stack with entries is ever written.
+        if (!Array.isArray(navRef.current.list) || navRef.current.list.length === 0) return
         const store = Object.assign({}, navBySidRef.current)
         if (live !== '') store[live] = { list: navRef.current.list, at: navRef.current.at, ts: Date.now() }
         navBySidRef.current = store

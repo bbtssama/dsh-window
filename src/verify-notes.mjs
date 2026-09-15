@@ -1420,6 +1420,11 @@ console.log('the history is wired into the real paths, not just written')
   // The stack lives in the HOST's per-session file, so a reload does not depend on browser storage.
   ok('every save also goes to the host, and the host answers it',
     /host\.call\('saveNav', \{ sessionId: sidRef\.current, list: navRef\.current\.list, at: navRef\.current\.at \}\)/.test(flat), 'saveNavNow')
+  // THE reported bug: on every page load the card's own stack is empty until the state answer hands the
+  // saved one back, and writing that emptiness out erased it — the next answer then carried nav: null,
+  // so nothing was ever adopted and the 后退/前进 menu came up empty after every single refresh.
+  ok('an EMPTY stack is never written out (that write is what erased the saved stack on every load)',
+    /if \(!Array\.isArray\(navRef\.current\.list\) \|\| navRef\.current\.list\.length === 0\) return/.test(flat), 'saveNavNow guard')
   ok('and the state answer\'s stack is adopted while ours is still empty',
     /if \(r\.nav !== undefined && navRef\.current\.at < 0\) \{/.test(flat) &&
     /const fromHost = navFromHost\(r\.nav, Date\.now\(\), NAV_TTL_MS\)/.test(flat), 'applyState')
