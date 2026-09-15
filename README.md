@@ -6,7 +6,7 @@ document. You highlight what matters, you may add a remark to any highlight, and
 reads exactly that: the quoted text, where it is, and your own words about it.
 
 DSH Web GUI 的**悬浮 Markdown 笔记卡片**：会话隔离的多笔记空间、Typora 级渲染、长按划选并持久化高亮、
-给任意高亮写备注，并通过 23 个 `note_*` 工具把这些原样交给模型。每份笔记是一个独立的 git 仓库。
+给任意高亮写备注，并通过 31 个 `note_*` 工具把这些原样交给模型。每份笔记是一个独立的 git 仓库。
 
 ```text
 工作区/dsh-window/note/<会话 id>/<笔记名>/
@@ -103,7 +103,7 @@ dsh plugin --profile <profile> add dsh-window
 
 ---
 
-## 模型工具（30 个）
+## 模型工具（31 个）
 
 **读取（低上下文成本）**
 
