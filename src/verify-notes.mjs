@@ -1612,6 +1612,13 @@ console.log('clickable task boxes (- [ ] / - [x]), the way Typora does it')
   } catch (err) { }
   ok('the task toggler is extractable from the client source',
     task !== null && typeof task.line === 'function' && typeof task.text === 'function', String(a) + ',' + String(b))
+  // The extraction above cannot see SCOPE: the block was first inserted next to the parser's task
+  // regex, i.e. INSIDE `function parseBlocks`, so the functions existed only in there and every call
+  // site outside it threw `ReferenceError: toggleTaskText is not defined` — clicking a box did nothing
+  // in a real browser while every assertion here passed. It must sit at module scope, before the parser.
+  ok('the task toggler sits at MODULE scope, not nested inside the parser that recognises the syntax',
+    a >= 0 && src.indexOf('function parseBlocks(text)') >= 0 && a < src.indexOf('function parseBlocks(text)') &&
+    /^\/\* TASK-PURE-START \*\//m.test(src), 'marker at ' + String(a) + ', parser at ' + String(src.indexOf('function parseBlocks(text)')) + ', column-0 marker: ' + /^\/\* TASK-PURE-START \*\//m.test(src))
   if (task) {
     ok('clicking an empty box writes [x]', task.line('- [ ] ② 启动 service') === '- [x] ② 启动 service', task.line('- [ ] ② 启动 service'))
     ok('clicking a checked box writes [ ] back', task.line('- [x] ② 启动 service') === '- [ ] ② 启动 service', task.line('- [x] ② 启动 service'))
