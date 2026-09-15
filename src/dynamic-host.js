@@ -275,6 +275,13 @@ return {
     // marks, each entry pointing at (note, markId), and it lives in the session state so it
     // survives a reload and is visible to the agent as data rather than as a UI accident.
     let lists = []
+    // ── the card's 后退/前进 stack (per session) ────────────────────────────────────
+    // Persisted HERE rather than in browser storage: it has to survive a reload, and the host
+    // already keeps per-session state (the reading position, the mark lists, the open note) under
+    // the session it knows itself — no client-side idea of "which session am I" is involved.
+    // Entries are `{ name, line }`, oldest first; `updatedAt` is what the card's ttl is read
+    // against, so a stack nobody has touched for a day is cleared rather than loaded.
+    let nav = null
     // ── fine-grained change events (per session) ─────────────────────────────────────
     // Every tool and RPC that mutates something appends a topic here, and the card reads them on
     // its (now much faster, when visible) state poll. A topic says WHICH part of the UI went
@@ -309,7 +316,7 @@ return {
         sid: sid, base: '', baseFrom: '', confirmed: false, pathCache: null, loadedBase: '',
         policyCache: null, sessionId: sid, stateCorrupt: false,
         activeNote: '', sessionNotes: null, summoned: false, uiRev: 0,
-        lists: [], uiQueue: [], uiSeq: 0, events: [], eventSeq: 0,
+        lists: [], nav: null, uiQueue: [], uiSeq: 0, events: [], eventSeq: 0,
         S: freshState(), diskVersions: new Map(), loading: null,
       }
     }
@@ -321,7 +328,7 @@ return {
       st.sessionId = sessionId; st.stateCorrupt = stateCorrupt
       st.activeNote = activeNote; st.sessionNotes = sessionNotes
       st.summoned = summoned; st.uiRev = uiRev
-      st.lists = lists; st.uiQueue = uiQueue; st.uiSeq = uiSeq
+      st.lists = lists; st.nav = nav; st.uiQueue = uiQueue; st.uiSeq = uiSeq
       st.events = events; st.eventSeq = eventSeq
       st.S = S; st.diskVersions = diskVersions; st.loading = loading
     }
@@ -336,6 +343,7 @@ return {
       activeNote = st.activeNote; sessionNotes = st.sessionNotes
       summoned = st.summoned === true; uiRev = intOr(st.uiRev, 0)
       lists = Array.isArray(st.lists) ? st.lists : []
+      nav = st.nav === undefined ? null : st.nav
       uiQueue = Array.isArray(st.uiQueue) ? st.uiQueue : []
       uiSeq = intOr(st.uiSeq, 0)
       events = Array.isArray(st.events) ? st.events : []
@@ -1134,6 +1142,43 @@ return {
       out.sort(function (a, b) { return a.localeCompare(b) })
       return out
     }
+    /** The card's visit stack as stored, validated: junk in the session file must not break it. */
+    function cleanNavList(raw) {
+      const src = Array.isArray(raw) ? raw : []
+      const out = []
+      for (let i = 0; i < src.length && out.length < 50; i++) {
+        const e = src[i]
+        if (!e || typeof e !== 'object') continue
+        const name = sanitizeNoteName(typeof e.name === 'string' ? e.name : '')
+        if (!name) continue
+        out.push({ name: name, line: Math.max(0, intOr(e.line, 0)) })
+      }
+      return out
+    }
+    function cleanNav(raw) {
+      if (!raw || typeof raw !== 'object') return null
+      const list = cleanNavList(raw.list)
+      if (list.length === 0) return null
+      const at = Math.min(Math.max(0, intOr(raw.at, 0)), list.length - 1)
+      return { list: list, at: at, updatedAt: Math.max(0, intOr(raw.updatedAt, 0)) }
+    }
+    /** One place decides what the session file holds: the open note, summon flag, lists, the stack. */
+    function sessionStatePayload() {
+      return { v: SESSION_STATE_VERSION, sessionId: sessionId, active: activeNote || '', summoned: summoned === true, lists: lists, nav: nav, updatedAt: isoNow() }
+    }
+    /**
+     * Persist the visit stack. Deliberately on the SILENT path: no revision bump and no uiRev bump,
+     * because the card saves this while the reader scrolls and a bump would force a full state answer
+     * every time (exactly the mistake saveView documents at length).
+     */
+    async function saveNavStore(input) {
+      const a = input || {}
+      const list = cleanNavList(a.list)
+      nav = list.length === 0 ? null : { list: list, at: Math.min(Math.max(0, intOr(a.at, 0)), list.length - 1), updatedAt: Date.now() }
+      if (fs === undefined || !canWrite() || !sessionId) return { ok: true, entries: nav ? nav.list.length : 0 }
+      try { await writeAt(sessionStatePath(), JSON.stringify(sessionStatePayload(), null, 2) + '\n') } catch (err) { fail('写入进退栈', err) }
+      return { ok: true, entries: nav ? nav.list.length : 0, at: nav ? nav.at : -1 }
+    }
     async function readSessionState() {
       if (!sessionId) return
       let parsed = null
@@ -1146,6 +1191,7 @@ return {
       // per session so a reload does not lose the panel in a session that has no note yet.
       summoned = !!(parsed && parsed.summoned === true)
       lists = cleanLists(parsed && parsed.lists)
+      nav = cleanNav(parsed && parsed.nav)
       const names = await listNoteDirs()
       sessionNotes = names
       if (want && names.indexOf(want) >= 0) activeNote = want
@@ -1159,7 +1205,7 @@ return {
       // the UI revision in the same place instead of hunting for every caller.
       uiRev += 1
       try {
-        const payload = { v: SESSION_STATE_VERSION, sessionId: sessionId, active: activeNote || '', summoned: summoned === true, lists: lists, updatedAt: isoNow() }
+        const payload = sessionStatePayload()
         await writeAt(sessionStatePath(), JSON.stringify(payload, null, 2) + '\n')
       } catch (err) { fail('写入会话状态', err) }
     }
@@ -1380,11 +1426,15 @@ return {
       // the UI revision is what makes the card poll again without waiting for a page reload.
       const jump = a.jump === true
       const prevJump = S.view && typeof S.view.jump === 'number' ? S.view.jump : 0
-      S.view = { line: line, anchor: anchor, updatedAt: isoNow(), jump: jump ? prevJump + 1 : prevJump }
+      // A jump is an EVENT, and the card needs to tell one it has not seen from one that was
+      // already in the note's view file before this page loaded. `jumpAt` is that timestamp; it is
+      // deliberately not persisted with the view, so a reload can never resurrect a stale event.
+      const prevJumpAt = S.view && typeof S.view.jumpAt === 'number' ? S.view.jumpAt : 0
+      S.view = { line: line, anchor: anchor, updatedAt: isoNow(), jump: jump ? prevJump + 1 : prevJump, jumpAt: jump ? Date.now() : prevJumpAt }
       // An announcement, not a plain scroll save: only a JUMP asks the card to move (note_goto),
       // while the periodic scroll save must stay silent or the reader would be dragged back to
       // wherever the last save happened to land.
-      if (jump) { uiRev += 1; emit('view', { line: line, anchor: anchor, jump: S.view.jump }) }
+      if (jump) { uiRev += 1; emit('view', { line: line, anchor: anchor, jump: S.view.jump, jumpAt: S.view.jumpAt }) }
       if (fs === undefined || !canWrite() || !activeNote) return { ok: true, line: line }
       await ensureViewIgnored()
       const payload = { v: 1, line: line, anchor: anchor, updatedAt: S.view.updatedAt }
@@ -1435,6 +1485,9 @@ return {
         // The reading position travels with every state answer, so switching a note (and a
         // page reload, which asks for the state again) gets it for free.
         view: S.view || null,
+        // The card's visit stack for this session (see `let nav`): it rides the state answer so a
+        // reload — or a return to this session — picks it up without any browser storage.
+        nav: nav,
         path: activeNote ? paths().note : '',
         relPath: activeNote ? (ROOT_DIR + '/' + NOTES_DIR + '/' + sessionId + '/' + activeNote + '/' + NOTE_FILE) : '',
         notesDir: sessionRoot(),
@@ -2884,6 +2937,14 @@ return {
     })
     // Where the reader is, so switching notes (or coming back tomorrow) resumes in place.    // Deliberately NOT part of the guarded selection state and not a revision bump: it is
     // written silently, often, and must not disturb the text/selection bookkeeping.
+    // The card's 后退/前进 stack (per session). Saved like the reading position: silently, often,
+    // and it touches no revision. The state answer carries it back (see stateView).
+    handleLocked('saveNav', async function (args) {
+      if (!bindSession(args && args.sessionId)) return notMine('saveNav')
+      confirmed = true
+      await ensureLoaded()
+      return await withNoteLock(noteLockKey(), function () { return saveNavStore(args) })
+    })
     handleLocked('saveView', async function (args) {
       if (!bindSession(args && args.sessionId)) return notMine('saveView')
       confirmed = true

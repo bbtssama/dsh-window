@@ -80,9 +80,9 @@ const hostHandleHits = count(hostBody, "handleLocked('")
 hostBody = hostBody.replaceAll('harness.registerTool(ctx, ', 'ctx.tools.register(')
 hostBody = hostBody.replaceAll('harness.handle(', 'handle(')
 if (hostToolHits !== 31) throw new Error('host: expected 31 tool registrations, saw ' + hostToolHits)
-// 23 note tools + 8 note management tools + 35 rpc handlers
-// (…/setMarkLook/lists/uiPush/uiAck/scanFolder/importFolder/commitAssets/pickFolder/syncNote/openMirrorDoc)
-if (hostHandleHits !== 35) throw new Error('host: expected 35 rpc handlers, saw ' + hostHandleHits)
+// 23 note tools + 8 note management tools + 36 rpc handlers
+// (…/setMarkLook/lists/uiPush/uiAck/scanFolder/importFolder/commitAssets/pickFolder/syncNote/openMirrorDoc/saveNav)
+if (hostHandleHits !== 36) throw new Error('host: expected 36 rpc handlers, saw ' + hostHandleHits)
 if (hostBody.includes('harness.')) throw new Error('host: a harness.* reference survived')
 
 // ── late-bound services ──

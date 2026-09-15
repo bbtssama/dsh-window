@@ -327,5 +327,45 @@ ok('confirming an unknown mark answers found:false instead of pretending',
   missingConfirm.result && missingConfirm.result.ok === false && missingConfirm.result.found === false,
   JSON.stringify(missingConfirm.result && { ok: missingConfirm.result.ok, found: missingConfirm.result.found }))
 
+// ── the stack the HOST keeps for the session (what a reload picks up) ─────────────────────────
+// Browser storage is a fast path, not the truth: the reported "刷新后栈就没了" could not be told apart
+// from a browser that refuses storage at all, so the stack now lives in the session's own file and
+// rides every state answer — the same channel the reading position and the mark lists already use.
+console.log('the visit stack is persisted by the HOST (no browser storage involved)')
+
+const sessFile = ROOT + '/dsh-window/note/' + SID + '/.session.json'
+const sn1 = await rpc('saveNav', { sessionId: SID, list: [{ name: 'note', line: 42 }, { name: 'note', line: 7 }], at: 1 })
+ok('saveNav is answered by the host', sn1.result && sn1.result.ok === true && sn1.result.entries === 2, JSON.stringify(sn1.result))
+ok('and the stack reached the session file',
+  /"nav"/.test(String(files.get(sessFile))) && /"line": 42/.test(String(files.get(sessFile))),
+  String(files.get(sessFile)).slice(0, 120))
+const stN = await rpc('state', { revision: -1, sessionId: SID })
+ok('the state answer carries it back, entries and cursor intact',
+  stN.result && stN.result.nav && stN.result.nav.list.length === 2 &&
+  stN.result.nav.list[0].line === 42 && stN.result.nav.at === 1,
+  JSON.stringify(stN.result && stN.result.nav))
+// The open note and the stack share one file: any other write of it must keep the stack.
+const kept = await (async () => { await rpc('selectNote', { sessionId: SID, name: 'note' }); return String(files.get(sessFile)) })()
+ok('another session-file write keeps the stack intact',
+  /"nav"/.test(kept) && /"line": 42/.test(kept), kept.slice(0, 120))
+const many = [{ name: '../evil', line: 1 }]
+for (let i = 0; i < 60; i++) many.push({ name: 'n' + i, line: i + 1 })
+const capped = await rpc('saveNav', { sessionId: SID, list: many, at: 999 })
+ok('a name that could escape the session subtree is dropped and the list is capped at 50',
+  capped.result && capped.result.ok === true && capped.result.entries === 50, JSON.stringify(capped.result))
+
+// A jump is an EVENT: the nonce alone cannot tell the card "this happened while you were watching",
+// which is what let a stale nonce push a phantom entry (and wipe a recorded line) on every return.
+const j1 = await rpc('saveView', { sessionId: SID, line: 12, anchor: 'x', jump: true })
+const stJ = await rpc('state', { revision: -1, sessionId: SID })
+ok('a jump carries a monotonic nonce AND the moment it happened',
+  stJ.result.view && stJ.result.view.jump === 1 && typeof stJ.result.view.jumpAt === 'number' && stJ.result.view.jumpAt > 0,
+  JSON.stringify(stJ.result.view) + ' save=' + JSON.stringify(j1.result))
+const j2 = await rpc('saveView', { sessionId: SID, line: 30, anchor: 'y' })
+const stJ2 = await rpc('state', { revision: -1, sessionId: SID })
+ok('a plain scroll moves the line but keeps both the nonce and its timestamp',
+  stJ2.result.view.line === 30 && stJ2.result.view.jump === 1 && stJ2.result.view.jumpAt === stJ.result.view.jumpAt,
+  JSON.stringify(stJ2.result.view))
+
 console.log(failed === 0 ? '\nALL RE-ANCHOR CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')
 process.exit(failed === 0 ? 0 : 1)

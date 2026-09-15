@@ -1270,11 +1270,12 @@ console.log('the back/forward history (a pure function, so it can be tested at a
   const b = src.indexOf(END)
   let nav = null
   try {
-    nav = new Function(src.slice(a + START.length, b) + '\nreturn { push: navPushVisit, jump: navRecordJump, session: navSwapSession, read: navReadStore, take: navFromStore, pack: navPackStore, prune: navPrune }')()
+    nav = new Function(src.slice(a + START.length, b) + '\nreturn { push: navPushVisit, jump: navRecordJump, session: navSwapSession, read: navReadStore, take: navFromStore, pack: navPackStore, prune: navPrune, host: navFromHost }')()
   } catch (err) { }
   ok('the history builder is extractable from the client source',
     nav !== null && typeof nav.push === 'function' && typeof nav.jump === 'function' && typeof nav.session === 'function' &&
-    typeof nav.read === 'function' && typeof nav.take === 'function' && typeof nav.pack === 'function' && typeof nav.prune === 'function',
+    typeof nav.read === 'function' && typeof nav.take === 'function' && typeof nav.pack === 'function' &&
+    typeof nav.prune === 'function' && typeof nav.host === 'function',
     String(a) + ',' + String(b))
   if (nav) {
     const empty = () => ({ list: [], at: -1 })
@@ -1386,8 +1387,8 @@ console.log('the history is wired into the real paths, not just written')
     /navPackStore\(map, Date\.now\(\), NAV_TTL_MS\)/.test(flat), 'writeNavStore')
   ok('the live session\'s stack is stamped each time it is saved, parked ones keep their own clock',
     /store\[live\] = \{ list: navRef\.current\.list, at: navRef\.current\.at, ts: Date\.now\(\) \}/.test(flat), 'saveNavNow')
-  ok('the stacks are persisted from every place that changes one (10 call sites, exactly one definition)',
-    (flat.match(/saveNavNow\(\)/g) || []).length === 11 && (flat.match(/function saveNavNow\(\)/g) || []).length === 1,
+  ok('the stacks are persisted from every place that changes one (11 call sites, exactly one definition)',
+    (flat.match(/saveNavNow\(\)/g) || []).length === 12 && (flat.match(/function saveNavNow\(\)/g) || []).length === 1,
     String((flat.match(/saveNavNow\(\)/g) || []).length) + ' occurrences of saveNavNow()')
   // A stack entry is pushed with line 0 when its note is opened, and it used to get a real line only
   // when the reader LEFT it — so anybody reading a note saw `line: 0` in the stored stack, and a reload
@@ -1409,7 +1410,19 @@ console.log('the history is wired into the real paths, not just written')
     /list\.push\(\{ name: e\.name, line: Math\.round\(Number\(e\.line\)\) \|\| 0 \}\)/.test(flat) &&
     /return \{ nav: \{ list: rec\.list\.slice\(\), at: at \}, expired: false \}/.test(flat), 'navReadStore + navFromStore')
   ok('and drops everything that pointed into the other session (target, recorded line, jump nonce)',
-    /navTargetRef\.current = null navPendRef\.current = null seenJumpRef\.current = 0/.test(flat), 'session-change block')
+    /navTargetRef\.current = null navPendRef\.current = null/.test(flat) && /seenJumpRef\.current = -1/.test(flat), 'session-change block')
+  // A phantom jump: the nonce is store state, not an event log, so the first one seen for a session
+  // may be minutes old. Acting on it pushed an entry and wiped a recorded line (the "回来一看行号没了").
+  ok('the first nonce of a session is a baseline, not a jump',
+    /if \(jump && seenJumpRef\.current < 0\) seenJumpRef\.current = jump else if \(jump && jump !== seenJumpRef\.current\) \{/.test(flat), 'applyState')
+  ok('a measurement of 0 never erases the line an entry had recorded',
+    /list\[nav\.at\] = \{ name: nav\.list\[nav\.at\]\.name, line: left >= 1 \? left : \(Math\.round\(Number\(nav\.list\[nav\.at\]\.line\)\) \|\| 0\) \}/.test(flat), 'navRecordJump')
+  // The stack lives in the HOST's per-session file, so a reload does not depend on browser storage.
+  ok('every save also goes to the host, and the host answers it',
+    /host\.call\('saveNav', \{ sessionId: sidRef\.current, list: navRef\.current\.list, at: navRef\.current\.at \}\)/.test(flat), 'saveNavNow')
+  ok('and the state answer\'s stack is adopted while ours is still empty',
+    /if \(r\.nav !== undefined && navRef\.current\.at < 0\) \{/.test(flat) &&
+    /const fromHost = navFromHost\(r\.nav, Date\.now\(\), NAV_TTL_MS\)/.test(flat), 'applyState')
   ok('a state answer seeds a still-empty history, so a session whose note name repeats is not blank',
     /if \(incoming !== '' && navRef\.current\.at < 0\) navRef\.current = navPushVisit\(navRef\.current, incoming, 0\)/.test(flat),
     'applyState')
@@ -1504,7 +1517,7 @@ console.log('the visit stack is persisted, and a record older than a day is clea
   const b = src.indexOf(END)
   let nav = null
   try {
-    nav = new Function(src.slice(a + START.length, b) + '\nreturn { session: navSwapSession, read: navReadStore, take: navFromStore, pack: navPackStore, prune: navPrune }')()
+    nav = new Function(src.slice(a + START.length, b) + '\nreturn { session: navSwapSession, read: navReadStore, take: navFromStore, pack: navPackStore, prune: navPrune, host: navFromHost }')()
   } catch (err) { }
   ok('the persistence helpers are extractable from the client source',
     nav !== null && typeof nav.read === 'function' && typeof nav.take === 'function' &&
@@ -1554,6 +1567,16 @@ console.log('the visit stack is persisted, and a record older than a day is clea
       (function () { const p = nav.prune({ list: [{ name: '甲', line: 1 }, { name: '乙', line: 2 }, { name: '丙', line: 3 }], at: 1 }, ['甲', '丙']); return p.list.length === 2 && p.at === 1 && p.list[p.at].name === '丙' })(), 'cursor fallback')
     ok('a stack whose notes all still exist is handed back untouched (same object, so no write happens)',
       (function () { const same = { list: one, at: 0 }; return nav.prune(same, ['甲']) === same })(), 'no-op')
+    // The stack the HOST keeps for this session, as it arrives on every state answer.
+    ok('the host\'s stack is adopted with its entries intact',
+      (function () { const h = nav.host({ list: one, at: 0, updatedAt: NOW - HOUR }, NOW, TTL); return h && h.list.length === 1 && h.list[0].line === 7 && h.at === 0 })(), 'from host')
+    ok('a host stack past the same 24h is dropped instead of loaded',
+      nav.host({ list: one, at: 0, updatedAt: NOW - TTL - 1 }, NOW, TTL) === null, 'host ttl')
+    ok('a host stack with a junk shape, or none at all, is ignored rather than trusted',
+      nav.host(null, NOW, TTL) === null && nav.host({ list: [] }, NOW, TTL) === null &&
+      nav.host({ list: [null, { nope: 1 }], at: 0, updatedAt: NOW }, NOW, TTL) === null, 'host validation')
+    ok('the host\'s cursor is clamped into the list it actually sent',
+      (function () { const h = nav.host({ list: one, at: 99, updatedAt: NOW }, NOW, TTL); return h && h.at === 0 })(), 'clamped')
   }
 }
 
