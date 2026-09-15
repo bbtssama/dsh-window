@@ -330,15 +330,19 @@ const c1 = await asTool('note_create', { name: '会议纪要' }, SID_A)
 ok('note_create makes a note directory under the session subtree',
   c1 && c1.ok === true && files.has(k(noteDirOf(SID_A, '会议纪要') + '/note.md')), JSON.stringify(c1 && { ok: c1.ok, dir: c1.dir }))
 ok('a new note is opened automatically', c1 && c1.active === '会议纪要', JSON.stringify(c1 && c1.active))
-// A note keeps its OWN repository, but it is created the first time the note needs history — not
-// when the note is created. Importing a 156-document folder used to spawn 6–8 git processes per
-// note, which is what made the whole machine unusable during an import.
-ok('a fresh note has no repository yet (nothing has needed history)',
-  !isDir(noteDirOf(SID_A, '会议纪要') + '/.git'), 'no .git before the first commit')
+// P1-7: the note_create TOOL builds the repository of the one note it just made, and says whether it
+// landed. Deferring it (which is what every other creator still does) made a successful note_create
+// look broken: note_diag answered gitReady:false until something else happened to need history.
+ok('note_create builds the note its own repository, in its own directory, and says so',
+  isDir(noteDirOf(SID_A, '会议纪要') + '/.git') && c1.gitReady === true &&
+  gitCalls.some((c) => c.args === 'init -q' && c.dir === noteDirOf(SID_A, '会议纪要')),
+  'gitReady=' + c1.gitReady + ', its own git init: ' + noteDirOf(SID_A, '会议纪要'))
+const diagC1 = await asTool('note_diag', {}, SID_A)
+ok('and history is live immediately: one init, a real head, nothing left to create',
+  diagC1.gitReady === true && diagC1.git !== 'none' &&
+  gitCalls.filter((c) => c.args === 'init -q' && c.dir === noteDirOf(SID_A, '会议纪要')).length === 1,
+  JSON.stringify({ gitReady: diagC1.gitReady, git: diagC1.git, inits: gitCalls.filter((c) => c.args === 'init -q' && c.dir === noteDirOf(SID_A, '会议纪要')).length }))
 await asTool('note_commit', { message: 'note: 第一次提交' }, SID_A)
-ok('and it gets its own repository the first time it needs one, in its own directory',
-  isDir(noteDirOf(SID_A, '会议纪要') + '/.git') && gitCalls.some((c) => c.args === 'init -q' && c.dir === noteDirOf(SID_A, '会议纪要')),
-  'its own git init: ' + noteDirOf(SID_A, '会议纪要'))
 const c2 = await asTool('note_create', { name: '读书笔记', text: '第一章\n要点甲\n' }, SID_A)
 ok('a second note can be created from text', c2 && c2.ok === true && /要点甲/.test(files.get(k(noteDirOf(SID_A, '读书笔记') + '/note.md'))), JSON.stringify(c2 && c2.ok))
 const listed = await asTool('note_list', {}, SID_A)
@@ -1209,7 +1213,7 @@ console.log('the cost of polling a session with many notes')
   const row = (listed.notes || []).filter((n) => n.name === '哈希测试')[0]
   ok('the list reads the commit hash out of .git itself, launching no git at all',
     row && row.commitHash === 'abcdef0' && gitCalls.length === gitBeforeHash,
-    JSON.stringify({ hash: row && row.commitHash, gitCalls: gitCalls.length - gitBeforeHash }))
+    JSON.stringify({ hash: row && row.commitHash, gitCalls: gitCalls.length - gitBeforeHash, calls: gitCalls.slice(gitBeforeHash).map((c) => c.dir.split('/').slice(-2).join('/') + ' :: ' + c.args) }))
   const rows = warmState.notes || []
   ok('and the list still carries every note with its size and its head',
     rows.length === 12 && rows.every((n) => n.lines >= 1 && n.bytes > 0), JSON.stringify(rows.slice(0, 2)))
@@ -1767,6 +1771,59 @@ console.log('the increment protocol: a one-line edit must not cost a full read (
   const afterFull = await t('note_status', {})
   ok('an explicit mode:"full" does move it, and then there is nothing unread',
     full.kind === 'full' && afterFull.changed === false, 'kind=' + full.kind + ' changed=' + afterFull.changed)
+}
+
+console.log('who made a mark — the agent\'s own marks never come back as the reader\'s (§P0-4)')
+{
+  // Before this, every mark was anonymous: a mark the agent created while answering (or turned green
+  // while closing a loop) was indistinguishable from a highlight the reader had just drawn, so the
+  // next `note_take_new_selections` fed the agent its own work back as if it were a user request.
+  const SID_AU = 'session-author-3333'
+  sessions._m.set(SID_AU, sessionWith(SID_AU, WS))
+  const t = async (name, args) => await asTool(name, args, SID_AU)
+  const render = (name, args, value) => {
+    const out = tools.get(name).output.render(args || {}, value)
+    return (out && out[0] && out[0].text) || ''
+  }
+  const dir = noteDirOf(SID_AU, '作者样本')
+  await t('note_create', { name: '作者样本', text: '# 作者样本\n\n甲行\n乙行\n丙行\n' })
+  const u = (await rpc('addSelection', { sessionId: SID_AU, startLine: 3, startCol: 0, endLine: 3, endCol: 2 })).result
+  const a = await t('note_add_selection', { startLine: 4, startCol: 0, endLine: 4, endCol: 2, color: 'green' })
+  ok('a mark drawn in the card is the reader\'s and a mark added by the agent is not',
+    u && u.ok === true && a && a.ok === true, JSON.stringify({ user: u && u.ok, agent: a && a.ok }))
+  const all = await t('note_get_selections', {})
+  const authorOf = {}
+  for (let i = 0; i < all.length; i++) authorOf[all[i].id] = all[i].author
+  ok('every mark says who made it', authorOf[u.id] === 'user' && authorOf[a.id] === 'agent', JSON.stringify(authorOf))
+  const fresh = await t('note_take_new_selections', {})
+  ok('the reader\'s highlight is delivered and the agent\'s own mark is NOT',
+    fresh.length === 1 && fresh[0].id === u.id, JSON.stringify(fresh.map((s) => s.id)))
+  ok('and the answer still says it is the reader\'s',
+    /用户新选中了 1 段/.test(render('note_take_new_selections', {}, fresh)), render('note_take_new_selections', {}, fresh).split('\n')[0])
+  const again = await t('note_take_new_selections', {})
+  ok('a highlight is consumed exactly once', again.length === 0, JSON.stringify(again))
+  const redo1 = await t('note_take_new_selections', { redeliver: true })
+  const redo2 = await t('note_take_new_selections', { redeliver: true })
+  ok('redeliver hands the same highlight back again and again, without consuming it (§P0-2 re-alignment)',
+    redo1.length === 1 && redo2.length === 1 && redo2[0].id === u.id,
+    JSON.stringify([redo1.map((s) => s.id), redo2.map((s) => s.id)]))
+  ok('and it says the answer includes already-delivered marks',
+    /redeliver/.test(render('note_take_new_selections', { redeliver: true }, redo1)), render('note_take_new_selections', { redeliver: true }, redo1).split('\n')[0])
+  const mine = await t('note_take_new_selections', { author: 'agent' })
+  ok('author:"agent" lists the agent\'s own marks',
+    mine.length === 1 && mine[0].id === a.id, JSON.stringify(mine.map((s) => s.id)))
+  const afterFiltered = await t('note_take_new_selections', { redeliver: true })
+  ok('asking for the agent\'s marks never swallows the reader\'s',
+    afterFiltered.length === 1 && afterFiltered[0].id === u.id, JSON.stringify(afterFiltered.map((s) => s.id)))
+  // §P1-5: the mark state file is metadata, and `git add -A` used to commit it on every mark edit —
+  // 23 KB of state per save, buried among content commits that carry no content at all.
+  const gi = String(files.get(k(dir + '/.gitignore')) || '')
+  ok('.note-state.json and .note-view.json are both ignored by the note repository',
+    gi.indexOf('.note-state.json') >= 0 && gi.indexOf('.note-view.json') >= 0, JSON.stringify(gi))
+  ok('and a repository that still tracked the state file was migrated once (git rm --cached)',
+    gitCalls.some((c) => c.args === 'rm --cached -q .note-state.json' && c.dir === dir), 'rm --cached issued at ' + dir)
+  ok('a note created by the tool has its repository ready and reported (§P1-7)',
+    (await t('note_diag', {})).gitReady === true, JSON.stringify({ gitReady: (await t('note_diag', {})).gitReady }))
 }
 
 console.log('the context cost of every tool call (measured, with a baseline ratchet)')
