@@ -288,6 +288,8 @@ const CSS = [
 // thread); ok/error are steady. It reports BACKGROUND git work, which is the only git left.
 '.dn-git-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:rgba(0,0,0,.16);}',
 '.dn-git-pending{background:#e0a92b;animation:dn-breathe 1.3s ease-in-out infinite;}',
+// Steady amber = there ARE uncommitted changes; breathing amber = git is working right now.
+'.dn-git-dirty{background:#e0a92b;}',
 '.dn-git-ok{background:#3aa860;}',
 '.dn-git-error{background:#d9534f;}',
 '@keyframes dn-breathe{0%,100%{opacity:.3;}50%{opacity:1;}}',
@@ -307,6 +309,7 @@ const CSS = [
 '.dn-notes-name{font-weight:600;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
 '.dn-notes-count{color:#8a8f98;font-size:10.5px;}',
 '.dn-notes-hash{color:#8a8f98;font-size:10.5px;}',
+'.dn-notes-dirty{color:#b7791f;background:rgba(224,169,43,.16);border-radius:999px;padding:1px 7px;font-size:10.5px;}',
 '.dn-btn-icon{padding:4px 9px;font-weight:700;letter-spacing:1px;}',
 '.dn-menu-item-sub{color:#d33;font-size:11px;}',
 '.dn-mark-missing{opacity:.75;}',
@@ -4121,6 +4124,10 @@ return {
           h('span', { className: 'dn-caret', key: 'v' }, '▾'),
         ]),
         st.commitHash ? h('span', { className: 'dn-notes-hash', key: 'h', title: '当前笔记的 git 提交' }, st.commitHash) : null,
+        (function () {
+          const mine = (notes || []).filter(function (x) { return x.name === noteName })[0]
+          return mine && mine.dirty === true ? h('span', { className: 'dn-notes-dirty', key: 'dirty', title: '这份笔记有改动还没提交（菜单里可以提交）' }, '未提交') : null
+        })(),
       ])
       // The remark input: opened by a long press on [选中] (the selection is still live, so
       // saving commits it WITH the remark in one call), or from a panel row to edit what is
@@ -4665,7 +4672,8 @@ return {
               buildNoteMenuRows(notes, openGroups).forEach(function (r) {
                 if (r.kind === 'note') {
                   const n = r.note
-                  items.push(mi('n' + n.name, String(n.name) + '  (' + n.lines + ' 行' + (n.commitHash ? ' · ' + n.commitHash : '') + ')', n.name === noteName, function () { switchNote(n.name) }, 'dn-tree-note', n.gitState, 1 + r.depth, true))
+                  const light = (n.gitState === 'idle' || !n.gitState) && n.dirty === true ? 'dirty' : n.gitState
+                  items.push(mi('n' + n.name, String(n.name) + '  (' + n.lines + ' 行' + (n.commitHash ? ' · ' + n.commitHash : '') + ')', n.name === noteName, function () { switchNote(n.name) }, 'dn-tree-note', light, 1 + r.depth, true))
                   return
                 }
                 items.push(mi(r.key, (r.open ? '▾ ' : '▸ ') + r.label + (r.kind === 'folder' ? '  (' + r.count + ' 份)' : ''), false, function () {

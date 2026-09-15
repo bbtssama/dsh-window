@@ -1500,6 +1500,9 @@ return {
           // The file is written; the repository can be created behind us. Awaiting it here was the
           // last place a save waited on git (three subprocesses, once per note) — the card's status
           // light shows the wait instead of imposing it.
+          // The change is not committed yet — the reader must be able to SEE that. In memory only:
+          // asking git for a status here would put process launches back on the path this cleared.
+          if (activeNote) factsOf(sessionRoot() + '/' + activeNote).dirty = true
           if (!S.gitReady && activeNote) queueRepoCreation(sessionRoot() + '/' + activeNote)
         } else {
           S.selections = remapped
@@ -1759,6 +1762,7 @@ return {
       // notes list nor the next note switch has to ask git again.
       if (activeNote) {
         const f = factsOf(sessionRoot() + '/' + activeNote)
+        f.dirty = false
         f.gitProbed = true
         f.gitHasHead = rev.ok === true
         f.hash = S.commitHash
@@ -2077,6 +2081,7 @@ return {
           f.gitHasHead = hash !== ''
           f.gitFor = f.textV
           f.state = 'ok'
+          f.dirty = false
           gitStatusRev += 1
         } catch (err) { f.state = 'error'; gitStatusRev += 1 }
       })
@@ -2221,6 +2226,9 @@ return {
         lines: intOr(f.lines, 0), bytes: intOr(f.bytes, 0),
         commitHash: typeof f.hash === 'string' ? f.hash : '',
         selections: intOr(f.selections, 0), line: intOr(f.viewLine, 0),
+        // The row's status light and the "未提交" warning. In memory, never a git call.
+        gitState: typeof f.state === 'string' ? f.state : 'idle',
+        dirty: f.dirty === true,
         // The imported folder this note belongs to, and its path inside it (the menu's tree).
         group: typeof f.group === 'string' ? f.group : '',
         relPath: relPath,
@@ -2431,7 +2439,7 @@ return {
               type: 'array', required: true,
               items: {
                 type: 'object', additionalProperties: false,
-                properties: { name: { type: 'string', required: true }, active: { type: 'boolean', required: true }, group: { type: 'string' }, relPath: { type: 'string' }, lines: { type: 'integer', required: true }, bytes: { type: 'integer', required: true }, commitHash: { type: 'string', required: true }, selections: { type: 'integer', required: true }, line: { type: 'integer', required: true } },
+                properties: { name: { type: 'string', required: true }, active: { type: 'boolean', required: true }, gitState: { type: 'string', required: true }, dirty: { type: 'boolean', required: true }, group: { type: 'string' }, relPath: { type: 'string' }, lines: { type: 'integer', required: true }, bytes: { type: 'integer', required: true }, commitHash: { type: 'string', required: true }, selections: { type: 'integer', required: true }, line: { type: 'integer', required: true } },
               },
             },
           },
