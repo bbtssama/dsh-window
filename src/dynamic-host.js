@@ -2166,7 +2166,11 @@ return {
       // Which imported folder this note came from, and where it sits inside it: both are already in
       // note.json. Cached by file version — no git, no subprocess, one tiny read the first time.
       const metaV = await versionOf(dir + '/' + NOTE_META)
-      if (f.metaV !== metaV || metaV === '') {
+      // note.json is written once, when the note is created, and never rewritten — so this is
+      // read ONCE per note per process instead of version-checked on every list. That check cost one
+      // lstat per note per poll: 160 notes measured 1493 ms for one listNotes, and every note switch
+      // pays for a list. `f.group` is the sentinel — the read below always leaves it a string.
+      if (f.group === undefined) {
         f.metaV = metaV
         f.group = ''
         f.origin = ''
