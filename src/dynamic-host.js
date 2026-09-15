@@ -3184,22 +3184,38 @@ return {
      * these documents use), then a heading id including Typora's `-1` numbering, then a prefix
      * match in either direction so `#并发-线程池详解` still finds `## 并发-线程池详解（重点）`.
      */
-    function anchorLineOf(text, anchor) {
+    function anchorLineOf(text, anchor, hint) {
       const raw = decodeAnchor(anchor)
       const want = slugifyHeading(raw)
       if (want === '') return 0
       const htmls = htmlAnchorIds(text)
-      for (let i = 0; i < htmls.length; i++) if (htmls[i].id === raw) return htmls[i].line
       const heads = headingIds(text)
+      // 1) an explicit anchor tag, anywhere in the document.
+      for (let i = 0; i < htmls.length; i++) if (htmls[i].id === raw) return htmls[i].line
+      // 2) a heading whose slug IS the anchor.
       for (let i = 0; i < heads.length; i++) if (heads[i].id === want) return heads[i].line
-      for (let i = 0; i < htmls.length; i++) if (slugifyHeading(htmls[i].id) === want) return htmls[i].line
+      // 3) the link's own visible text — the author numbered the heading with exactly that
+      //    ("12. Seata XA 模式"), so an exact title beats every fuzzy guess below.
+      const hintSlug = typeof hint === 'string' ? slugifyHeading(hint) : ''
+      if (hintSlug !== '') {
+        for (let i = 0; i < heads.length; i++) if (heads[i].id === hintSlug) return heads[i].line
+      }
+      // 4) the anchor is a SHORT form of a numbered heading (#seata-xa ↔ 12-seata-xa-模式). Accept
+      //    a suffix/prefix match, then take the SHORTEST heading and the earliest — the section
+      //    heading itself, never a later sub-heading that merely mentions it. Matching the first
+      //    heading that CONTAINS the anchor is how a jump landed at the end of a section or in the
+      //    next one: the mention came later in the document than the section.
+      const cands = []
       for (let i = 0; i < heads.length; i++) {
-        if (heads[i].id.indexOf(want) === 0 || want.indexOf(heads[i].id) === 0) return heads[i].line
+        const id = heads[i].id
+        if (id.slice(-want.length) === want || id.indexOf(want) === 0) cands.push(heads[i])
+        else if (hintSlug !== '' && (id.slice(-hintSlug.length) === hintSlug || id.indexOf(hintSlug) === 0)) cands.push(heads[i])
       }
-      for (let i = 0; i < htmls.length; i++) {
-        const s = slugifyHeading(htmls[i].id)
-        if (s.indexOf(want) === 0 || want.indexOf(s) === 0) return htmls[i].line
+      if (cands.length) {
+        cands.sort(function (a, b) { return (a.id.length - b.id.length) || (a.line - b.line) })
+        return cands[0].line
       }
+      // 5) last resort, and never silent: the anchor appears somewhere inside a heading.
       for (let i = 0; i < heads.length; i++) if (slugifyHeading(heads[i].title).indexOf(want) >= 0) return heads[i].line
       return 0
     }
@@ -3237,7 +3253,7 @@ return {
       if (rawPath === '') {
         if (anchor === '') return { ok: false, error: '链接指向了空路径' }
         const here = await readIfExists(sessionRoot() + '/' + activeNote + '/' + NOTE_FILE)
-        const at = here === null ? 0 : anchorLineOf(String(here), anchor)
+        const at = here === null ? 0 : anchorLineOf(String(here), anchor, (args && args.hint) || '')
         await saveView({ line: at, anchor: String(here === null ? '' : here).split('\n')[at - 1].trim().slice(0, 40), jump: true })
         return { ok: true, note: activeNote, existed: true, same: true, line: at, anchor: anchor, anchored: at > 0, error: at > 0 ? '' : ('这份笔记里没有 #' + anchor + ' 对应的标题') }
       }
@@ -3294,7 +3310,7 @@ return {
       let line = 0
       if (anchor !== '') {
         const body = await readIfExists(sessionRoot() + '/' + noteName + '/' + NOTE_FILE)
-        line = body === null ? 0 : anchorLineOf(String(body), anchor)
+        line = body === null ? 0 : anchorLineOf(String(body), anchor, (args && args.hint) || '')
         if (line > 0) await saveView({ line: line, anchor: String(body === null ? '' : body).split('\n')[line - 1].trim().slice(0, 40), jump: true })
       }
       return {

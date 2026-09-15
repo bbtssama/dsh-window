@@ -1208,6 +1208,9 @@ return {
       // `/window-note start|stop`, so without sending this the poll kept answering "unchanged"
       // and the card only appeared after a full page reload.
       const uiRevRef = React.useRef(0)
+      // While a jump is being applied, the scroll-driven save must NOT write the position it is
+      // scrolling AWAY from — that race is "jumped, then went back to where I was reading".
+      const jumpWindowUntilRef = React.useRef(0)
       // What the card last saw of the notes' background git status (the rows' status light). ECHOED
       // to the host, exactly like uiRevision, so a background completion reaches the card without a
       // full state answer on every poll.
@@ -1475,6 +1478,7 @@ return {
         const jump = r.view && typeof r.view.jump === 'number' ? r.view.jump : 0
         if (jump && jump !== seenJumpRef.current) {
           seenJumpRef.current = jump
+          jumpWindowUntilRef.current = Date.now() + 2500
           restoredForRef.current = incoming
           pendingViewRef.current = { line: Math.round(Number(r.view.line) || 1), anchor: String(r.view.anchor || ''), tries: 0 }
           viewSavedRef.current = { line: 0, note: incoming }
@@ -2735,6 +2739,7 @@ return {
         return pick(fresh)
       }
       function saveViewNow() {
+        if (Date.now() < jumpWindowUntilRef.current) return
         if (viewSaveTimerRef.current !== null) { try { window.clearTimeout(viewSaveTimerRef.current) } catch (err) { } viewSaveTimerRef.current = null }
         if (!sidRef.current) return
         const line = topVisibleLine()
@@ -3293,7 +3298,7 @@ return {
         if (href === '' || (!fragmentOnly && !isLocalRef(href))) return
         e.preventDefault()
         e.stopPropagation()
-        host.call('openMirrorDoc', { sessionId: sidRef.current, href: href }).then(function (r) {
+        host.call('openMirrorDoc', { sessionId: sidRef.current, href: href, hint: String((a && a.textContent) || '').trim().slice(0, 80) }).then(function (r) {
           if (r && r.ok) {
             // An anchor link (Typora's table of contents) opens the note AND lands on the heading:
             // the host has already set the view jump, so the card moves on the next poll.
