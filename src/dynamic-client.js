@@ -4534,6 +4534,65 @@ return {
       // ── the chrome menus: note picker, mark view, overflow actions ───────────────────
       // `light` is the note row's git status dot: idle (nothing to do) / pending (git working in the
       // background) / ok / error. It is data the poll already carries, so it costs no extra call.
+      /* TREE-PURE-START */
+      /**
+       * The rows a note menu should contain. PURE: no React, no DOM, no I/O, no state — which is
+       * the whole point. The version of this logic that lived inside the render loop drew the
+       * folder row once per note (157 copies) and no test could see it; a pure function can be
+       * called by the suite and asserted on.
+       *
+       * @param notes     the note rows the host sent (name, group, relPath, lines, commitHash…)
+       * @param openKeys  map of expanded keys: "g|<group>" for a folder, "g|<group>|<dir>" for a dir
+       * @returns rows, in order: { kind:"folder", key, label, count, open, depth }
+       *                          { kind:"dir",    key, label, open, depth }
+       *                          { kind:"note",   key, note, depth }
+       */
+      function buildNoteMenuRows(notes, openKeys) {
+        const open = openKeys || {}
+        const rows = []
+        const groups = {}
+        const loose = []
+        ;(notes || []).forEach(function (n) {
+          const g = String((n && n.group) || '')
+          if (g === '' || !n.relPath) loose.push(n)
+          else { if (!groups[g]) groups[g] = []; groups[g].push(n) }
+        })
+        // The tree grows out of the notes' own paths: a directory exists only when a note lives
+        // under it, and its nesting is the real nesting. One level is revealed at a time.
+        const buildTree = function (list) {
+          const root = { dirs: {}, notes: [] }
+          list.forEach(function (n) {
+            const segs = String(n.relPath).split('/')
+            let node = root
+            for (let i = 0; i < segs.length - 1; i++) {
+              if (!node.dirs[segs[i]]) node.dirs[segs[i]] = { dirs: {}, notes: [] }
+              node = node.dirs[segs[i]]
+            }
+            node.notes.push(n)
+          })
+          return root
+        }
+        const walk = function (node, g, path, depth) {
+          Object.keys(node.dirs).sort(function (a, b) { return a.localeCompare(b) }).forEach(function (name) {
+            const key = g + '|' + (path === '' ? name : path + '/' + name)
+            const isOpen = open[key] === true
+            rows.push({ kind: 'dir', key: key, label: name, open: isOpen, depth: depth })
+            if (isOpen) walk(node.dirs[name], g, path === '' ? name : path + '/' + name, depth + 1)
+          })
+          node.notes.slice().sort(function (a, b) { return String(a.relPath).localeCompare(String(b.relPath)) }).forEach(function (n) {
+            rows.push({ kind: 'note', key: 'n' + g + n.name, note: n, depth: depth })
+          })
+        }
+        Object.keys(groups).sort(function (a, b) { return a.localeCompare(b) }).forEach(function (g) {
+          const key = 'g|' + g
+          const isOpen = open[key] === true
+          rows.push({ kind: 'folder', key: key, label: g.replace(/^.*?_assets\//, '').replace(/-[0-9a-f]{8}$/, ''), count: groups[g].length, open: isOpen, depth: 0 })
+          if (isOpen) walk(buildTree(groups[g]), g, '', 1)
+        })
+        loose.forEach(function (n) { rows.push({ kind: 'note', key: 'n' + n.name, note: n, depth: 0 }) })
+        return rows
+      }
+      /* TREE-PURE-END */
       const mi = function (key, label, on, fn, cls, light, indent, keep) {
         const dot = light ? h('span', { key: 'd', className: 'dn-git-dot dn-git-' + (light === true ? 'ok' : light), title: ({ idle: '无需 git 操作', pending: 'git 正在后台处理…', ok: '已提交到它自己的仓库', error: 'git 操作失败' })[light === true ? 'ok' : light] || '' }) : null
         return h('button', {
@@ -4560,57 +4619,20 @@ return {
             // loose note — 157 times. The flag lives on the fresh per-render array, so it resets
             // with every render and needs no assumption about the surrounding loop.
             // ONCE per menu render: the note menu's tree.
+            // ONCE per menu render: ask the pure function which rows the menu has, then map them to
+            // buttons. All the grouping/nesting lives in buildNoteMenuRows, where the suite can see it.
             if (!items.__treeBuilt) {
               items.__treeBuilt = true
-              const rowOf = function (n, depth) {
-                return mi('n' + n.name, String(n.name) + '  (' + n.lines + ' 行' + (n.commitHash ? ' · ' + n.commitHash : '') + ')', n.name === noteName, function () { switchNote(n.name) }, 'dn-tree-note', n.gitState, 1 + depth, true)
-              }
-              const groups = {}
-              const loose = []
-              notes.forEach(function (n) {
-                const g = String(n.group || '')
-                if (g === '' || !n.relPath) loose.push(n)
-                else { if (!groups[g]) groups[g] = []; groups[g].push(n) }
+              buildNoteMenuRows(notes, openGroups).forEach(function (r) {
+                if (r.kind === 'note') {
+                  const n = r.note
+                  items.push(mi('n' + n.name, String(n.name) + '  (' + n.lines + ' 行' + (n.commitHash ? ' · ' + n.commitHash : '') + ')', n.name === noteName, function () { switchNote(n.name) }, 'dn-tree-note', n.gitState, 1 + r.depth, true))
+                  return
+                }
+                items.push(mi(r.key, (r.open ? '▾ ' : '▸ ') + r.label + (r.kind === 'folder' ? '  (' + r.count + ' 份)' : ''), false, function () {
+                  setOpenGroups(function (prev) { const nx = Object.assign({}, prev); nx[r.key] = nx[r.key] !== true; return nx })
+                }, r.kind === 'folder' ? 'dn-tree-folder' : 'dn-tree-dir-row', undefined, 1 + r.depth, true))
               })
-              // The tree grows out of the notes' own paths, so a directory exists in it only when a
-              // note lives under it — and a directory keeps its real nesting, expanded one level at a
-              // time, instead of every path being flattened and merely indented.
-              const buildTree = function (list) {
-                const root = { dirs: {}, notes: [] }
-                list.forEach(function (n) {
-                  const segs = String(n.relPath).split('/')
-                  let node = root
-                  for (let i = 0; i < segs.length - 1; i++) {
-                    if (!node.dirs[segs[i]]) node.dirs[segs[i]] = { dirs: {}, notes: [] }
-                    node = node.dirs[segs[i]]
-                  }
-                  node.notes.push(n)
-                })
-                return root
-              }
-              const renderNode = function (node, g, path, depth) {
-                Object.keys(node.dirs).sort(function (a, b) { return a.localeCompare(b) }).forEach(function (name) {
-                  const key = g + '|' + (path === '' ? name : path + '/' + name)
-                  const open = openGroups[key] === true
-                  items.push(mi('d' + key, (open ? '▾ ' : '▸ ') + name, false, function () {
-                    setOpenGroups(function (prev) { const nx = Object.assign({}, prev); nx[key] = nx[key] !== true; return nx })
-                  }, 'dn-tree-dir-row', undefined, 1 + depth, true))
-                  if (open) renderNode(node.dirs[name], g, path === '' ? name : path + '/' + name, depth + 1)
-                })
-                node.notes.slice().sort(function (a, b) { return String(a.relPath).localeCompare(String(b.relPath)) }).forEach(function (n) {
-                  items.push(rowOf(n, depth))
-                })
-              }
-              Object.keys(groups).sort(function (a, b) { return a.localeCompare(b) }).forEach(function (g) {
-                const key = 'g|' + g
-                const open = openGroups[key] === true
-                const label = g.replace(/^.*?_assets\//, '').replace(/-[0-9a-f]{8}$/, '')
-                items.push(mi('g' + g, (open ? '▾ ' : '▸ ') + label + '  (' + groups[g].length + ' 份)', false, function () {
-                  setOpenGroups(function (prev) { const nx = Object.assign({}, prev); nx[key] = nx[key] !== true; return nx })
-                }, 'dn-tree-folder', undefined, 0, true))
-                if (open) renderNode(buildTree(groups[g]), g, '', 0)
-              })
-              loose.forEach(function (n) { items.push(rowOf(n, 0)) })
             }
           }
           items.push(h('div', { className: 'dn-menu-sep', key: 's1' }))

@@ -18,6 +18,7 @@
  * Run: node src/verify-notes.mjs
  */
 import path from 'node:path'
+import fsSync from 'node:fs'
 
 const lib = path.join('D:\\DSH\\profiles\\web\\node_modules\\dsh-window\\lib')
 const host = await import(new URL('file:///' + path.join(lib, 'index.js').replace(/\\/g, '/')).href)
@@ -1201,6 +1202,58 @@ console.log('the cost of polling a session with many notes')
   const n3 = (after.notes || []).filter((n) => n.name === '笔记 3')[0]
   ok('an outside change to a non-active note is picked up (the cache follows the file version)',
     n3 && n3.lines === 4, JSON.stringify(n3))
+}
+
+console.log('the note menu tree (a pure function, so it can be tested at all)')
+// The version of this logic that lived inside the render loop drew the folder row once per note
+// (157 copies on a real session) and nothing could see it. It is a pure function now, extracted
+// from the client source between its markers and called directly.
+{
+  const START = '/* TREE-PURE-START */'
+  const END = '/* TREE-PURE-END */'
+  const src = fsSync.readFileSync(new URL('./dynamic-client.js', import.meta.url), 'utf8')
+  const a = src.indexOf(START)
+  const b = src.indexOf(END)
+  let build = null
+  try {
+    build = new Function(src.slice(a + START.length, b) + "\nreturn buildNoteMenuRows")()
+  } catch (err) { }
+  ok('the menu-row builder is extractable from the client source', typeof build === 'function', String(a) + ',' + String(b))
+  const note = (name, group, relPath, lines) => ({ name: name, group: group || '', relPath: relPath || '', lines: lines || 1, commitHash: '', gitState: 'idle' })
+  const g = '_assets/java面试八股大笔记-feb65ed0'
+  const deep = [
+    note('A', g, '知识库/详细笔记/A.md'),
+    note('B', g, '知识库/详细笔记/B.md'),
+    note('C', g, '知识库/C.md'),
+    note('手写', '', '')
+  ]
+  const closed = build(deep, {})
+  ok('a folder import collapses to ONE folder row, no matter how many notes it holds',
+    closed.filter((r) => r.kind === 'folder').length === 1 && closed.filter((r) => r.kind === 'note').length === 1,
+    JSON.stringify(closed.map((r) => r.kind + ':' + (r.label || r.note.name))))
+  ok('and the folder row counts every note in it', closed[0].count === 3, JSON.stringify(closed[0]))
+  ok('a note without a folder stays a flat row', closed[closed.length - 1].note.name === '手写', JSON.stringify(closed[closed.length - 1]))
+  const folderKey = closed.filter((r) => r.kind === 'folder')[0].key
+  const opened = build(deep, { [folderKey]: true })
+  const dirKey = (opened.filter((r) => r.kind === 'dir')[0] || {}).key
+  ok('opening the folder reveals only its DIRECTORIES — a note inside one is not listed yet',
+    opened.filter((r) => r.kind === 'dir').length === 1 &&
+    !opened.some((r) => r.kind === 'note' && (r.note.name === 'C' || r.note.name === 'A')),
+    JSON.stringify(opened.map((r) => r.kind + ':' + (r.label || r.note.name))))
+  const openDir = build(deep, { [folderKey]: true, [dirKey]: true })
+  ok('opening a directory lists the notes in it, but not the notes of ITS subdirectory',
+    openDir.some((r) => r.kind === 'note' && r.note.name === 'C') &&
+    !openDir.some((r) => r.kind === 'note' && r.note.name === 'A'),
+    'two levels')
+  const deepKey = (openDir.filter((r) => r.kind === 'dir')[0] || {}).key
+  const fully = build(deep, { [folderKey]: true, [dirKey]: true, [deepKey]: true })
+  ok('opening every level finally lists the deepest notes, indented deeper than the shallower one',
+    fully.some((r) => r.kind === 'note' && r.note.name === 'A') &&
+    (fully.filter((r) => r.kind === 'note' && r.note.name === 'A')[0] || {}).depth > (fully.filter((r) => r.kind === 'note' && r.note.name === 'C')[0] || {}).depth,
+    JSON.stringify(fully.map((r) => r.kind + ':' + (r.label || r.note.name) + '@' + r.depth)))
+  ok('the folder row appears exactly once even with many notes (the 157-copies bug)',
+    build([...Array(157)].map((_, i) => note('N' + i, g, 'd' + (i % 3) + '/N' + i + '.md')), {}).filter((r) => r.kind === 'folder').length === 1,
+    '157 notes')
 }
 
 console.log('the folder picker')
