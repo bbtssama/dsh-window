@@ -1489,7 +1489,7 @@ return {
       // can tell "same revision, but a different note" from "nothing changed" — a revision is
       // only a per-note in-memory counter and two notes can share the same value.
       const shownNoteRef = React.useRef('')
-      // The last view-jump nonce seen from the host (an agent running note_goto).
+      // The last view-jump nonce seen from the host (an agent running note_scroll_to).
       const seenJumpRef = React.useRef(0)
       // Pending "the session id was not ready yet" retry of the state poll.
       const retryRef = React.useRef(0)
@@ -1758,9 +1758,9 @@ return {
        *   marks  the marks of the active note (tints, list rows)
        *   notes  the note picker
        *   lists  the custom mark lists (and the view tabs that show them)
-       *   view   a requested reading position (note_goto) — the card must actually move
+       *   view   a requested reading position (note_scroll_to) — the card must actually move
        *   git    the commit hash in the footer
-       *   ui     a queued view command (note_ui / note_panel) — already handled by its own effect
+       *   ui     a queued view command (note_card_ui / note_card_panel) — already handled by its own effect
        * Anything not listed here simply means "the full state answer already covers it".
        */
       function applyEvents(list) {
@@ -1795,7 +1795,7 @@ return {
         }
         if (Array.isArray(r.events)) applyEvents(r.events)
         // Custom mark lists ride every state poll, so the tabs and their counts stay in step
-        // with whatever the agent (note_lists) or another window did to them.
+        // with whatever the agent (note_mark_lists) or another window did to them.
         if (Array.isArray(r.lists)) setListData(r.lists)
         if (typeof r.uiRevision === 'number') { uiRevRef.current = r.uiRevision; hostUiRevRef.current = true }
         if (typeof r.gitRevision === 'number') gitRevRef.current = r.gitRevision
@@ -1841,7 +1841,7 @@ return {
         // `at < 0` means nothing is recorded yet, so this can never disturb a real trail.
         if (incoming !== '' && navRef.current.at < 0) navRef.current = navPushVisit(navRef.current, incoming, 0)
         if (Object.prototype.hasOwnProperty.call(r, 'view')) hostViewRef.current = true
-        // An agent asked the card to go somewhere (note_goto) — the note text and the revision
+        // An agent asked the card to go somewhere (note_scroll_to) — the note text and the revision
         // are unchanged, so only the nonce tells this apart from a routine state refresh.
         const jump = r.view && typeof r.view.jump === 'number' ? r.view.jump : 0
         // The FIRST nonce seen for a session is a BASELINE: it may have been set long before this page
@@ -2014,7 +2014,7 @@ return {
         return function () { try { window.clearTimeout(id) } catch (err) { } }
       }, [panel, markTab, noteName, marksWin ? 'win' : 'dock', shownSessionId, hidden])
       // The agent drives the card's own view state through this queue: the host appends a
-      // command (note_ui / note_panel), the card performs it here and acknowledges it by id so
+      // command (note_card_ui / note_card_panel), the card performs it here and acknowledges it by id so
       // the same command can never run twice. The list is already in every state poll, so no
       // new request is involved.
       const uiKey = st && Array.isArray(st.ui) ? st.ui.map(function (e) { return e && e.id }).join(',') : ''
@@ -2663,7 +2663,7 @@ return {
       }
       /**
        * Jump to a mark, switching notes when it lives in another one. `pendingViewRef` is the
-       * same channel the reading position restore and the agent's note_goto use.
+       * same channel the reading position restore and the agent's note_scroll_to use.
        */
       function jumpToMark(note, line) {
         const target = Math.max(1, Math.round(Number(line) || 1))
@@ -2902,7 +2902,7 @@ return {
           if (markTab === 'list:' + name) setMarkTab('note')
         })
       }
-      /** Perform one view command the agent queued (see note_ui / note_panel). */
+      /** Perform one view command the agent queued (see note_card_ui / note_card_panel). */
       function runUiCommand(cmd) {
         const kind = String((cmd && cmd.kind) || '')
         if (kind === 'open') { setPanel(true); loadAllMarks(); return }

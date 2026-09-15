@@ -214,7 +214,7 @@ const sessions = { _m: new Map(), get(id) { return this._m.get(id) || null } }
 // top-level `required: [...]` array (dsh-tools: "task.required.push(task.key"), and the
 // runtime enforces that array ("missing required property ..."). Reading only the
 // per-property flag made this checker blind to missing properties — it saw every property
-// as optional, so note_create/note_clear shipped returning no `error` on success and the
+// as optional, so note_create/note_clear_keep_history shipped returning no `error` on success and the
 // live harness rejected them. Honour BOTH forms.
 function checkSchema(schema, value, path, errs) {
   if (!schema) return
@@ -363,23 +363,23 @@ ok('the first session still sees its own two notes',
 console.log('switching, importing, clearing')
 const sel = await asTool('note_open', { name: '会议纪要' }, SID_A)
 ok('note_open switches the active note', sel.ok === true && sel.active === '会议纪要', JSON.stringify(sel && { ok: sel.ok, active: sel.active }))
-const imp = await asTool('note_import', { text: '导入的一段\n', mode: 'append' }, SID_A)
-ok('note_import appends into the active note', imp.ok === true && /导入的一段/.test(files.get(k(noteDirOf(SID_A, '会议纪要') + '/note.md'))), JSON.stringify(imp && imp.ok))
+const imp = await asTool('note_append', { text: '导入的一段\n' }, SID_A)
+ok('note_append appends into the active note', imp.ok === true && /导入的一段/.test(files.get(k(noteDirOf(SID_A, '会议纪要') + '/note.md'))), JSON.stringify(imp && imp.ok))
 const before = files.get(k(noteDirOf(SID_A, '会议纪要') + '/note.md'))
-const cleared = await asTool('note_clear', {}, SID_A)
-ok('note_clear replaces the body', cleared.ok === true && files.get(k(noteDirOf(SID_A, '会议纪要') + '/note.md')) === '# 会议纪要\n', JSON.stringify(files.get(k(noteDirOf(SID_A, '会议纪要') + '/note.md'))))
-ok('note_clear reports how much it removed', cleared.clearedLines >= 2, JSON.stringify(cleared.clearedLines))
-ok('note_clear keeps the note directory and its git',
+const cleared = await asTool('note_clear_keep_history', {}, SID_A)
+ok('note_clear_keep_history replaces the body', cleared.ok === true && files.get(k(noteDirOf(SID_A, '会议纪要') + '/note.md')) === '# 会议纪要\n', JSON.stringify(files.get(k(noteDirOf(SID_A, '会议纪要') + '/note.md'))))
+ok('note_clear_keep_history reports how much it removed', cleared.clearedLines >= 2, JSON.stringify(cleared.clearedLines))
+ok('note_clear_keep_history keeps the note directory and its git',
   isDir(noteDirOf(SID_A, '会议纪要') + '/.git') && !!before.endsWith('\n'), 'directory + .git still present')
 
 console.log('renaming and deleting')
 const ren = await asTool('note_rename', { from: '读书笔记', to: '读书笔记2' }, SID_A)
 ok('note_rename moves the directory', ren.ok === true && files.has(k(noteDirOf(SID_A, '读书笔记2') + '/note.md')) && !files.has(k(noteDirOf(SID_A, '读书笔记') + '/note.md')), JSON.stringify(ren && ren.ok))
-const del0 = await asTool('note_delete', { name: '读书笔记2' }, SID_A)
-ok('note_delete without confirm is refused', del0.ok === false && del0.needsConfirm === true, JSON.stringify(del0))
+const del0 = await asTool('note_delete_forever', { name: '读书笔记2' }, SID_A)
+ok('note_delete_forever without confirm is refused', del0.ok === false && del0.needsConfirm === true, JSON.stringify(del0))
 ok('and nothing was removed', files.has(k(noteDirOf(SID_A, '读书笔记2') + '/note.md')), 'still there')
-const del = await asTool('note_delete', { name: '读书笔记2', confirm: true }, SID_A)
-ok('note_delete with confirm removes the whole tree including .git',
+const del = await asTool('note_delete_forever', { name: '读书笔记2', confirm: true }, SID_A)
+ok('note_delete_forever with confirm removes the whole tree including .git',
   del.ok === true && !files.has(k(noteDirOf(SID_A, '读书笔记2') + '/note.md')) && !isDir(noteDirOf(SID_A, '读书笔记2') + '/.git'),
   JSON.stringify(del && { ok: del.ok, deleted: del.deleted, remaining: del.remaining }))
 const last = await asTool('note_list', {}, SID_A)
@@ -390,18 +390,18 @@ console.log('selections are per note')
 // highlights (and the tools must never mix them up).
 await tools.get('note_open').execute({ name: '会议纪要' }, { agent: { session: sessionWith(SID_A, WS) } })
 await tools.get('note_write').execute({ content: '第一行内容\n第二行内容\n', mode: 'replace', commit: false }, { agent: { session: sessionWith(SID_A, WS) } })
-const selA = await tools.get('note_add_selection').execute({ startLine: 1, startCol: 0, endLine: 1, endCol: 3, color: 'yellow' }, { agent: { session: sessionWith(SID_A, WS) } })
+const selA = await tools.get('note_mark_add').execute({ startLine: 1, startCol: 0, endLine: 1, endCol: 3, color: 'yellow' }, { agent: { session: sessionWith(SID_A, WS) } })
 ok('a selection can be added to the open note', selA && selA.ok === true, JSON.stringify(selA && selA.ok))
-const gotA = await tools.get('note_get_selections').execute({}, { agent: { session: sessionWith(SID_A, WS) } })
-ok('note_get_selections returns it', gotA.length === 1 && gotA[0].startLine === 1, JSON.stringify(gotA.map((x) => x.startLine + ':' + x.startCol)))
+const gotA = await tools.get('note_mark_list').execute({}, { agent: { session: sessionWith(SID_A, WS) } })
+ok('note_mark_list returns it', gotA.length === 1 && gotA[0].startLine === 1, JSON.stringify(gotA.map((x) => x.startLine + ':' + x.startCol)))
 const created = await tools.get('note_create').execute({ name: '另一份', text: '# 另一份\n别的正文\n' }, { agent: { session: sessionWith(SID_A, WS) } })
 ok('a second note can be opened', created.ok === true, JSON.stringify(created && created.ok))
-const gotB = await tools.get('note_get_selections').execute({}, { agent: { session: sessionWith(SID_A, WS) } })
+const gotB = await tools.get('note_mark_list').execute({}, { agent: { session: sessionWith(SID_A, WS) } })
 ok('the other note has NO selections of its own', gotB.length === 0, JSON.stringify(gotB.length))
 const found = await tools.get('note_find').execute({ query: '别的正文' }, { agent: { session: sessionWith(SID_A, WS) } })
 ok('note_find searched the newly opened note', found && found.hits && found.hits.length === 1, JSON.stringify(found && found.hits))
 await tools.get('note_open').execute({ name: '会议纪要' }, { agent: { session: sessionWith(SID_A, WS) } })
-const backA = await tools.get('note_get_selections').execute({}, { agent: { session: sessionWith(SID_A, WS) } })
+const backA = await tools.get('note_mark_list').execute({}, { agent: { session: sessionWith(SID_A, WS) } })
 ok('switching back restores the earlier note selections', backA.length === 1 && backA[0].startLine === 1, JSON.stringify(backA.length))
 ok('the notes list reports rows, not bare names',
   (await tools.get('note_list').execute({}, { agent: { session: sessionWith(SID_A, WS) } })).notes.every((n) => typeof n.name === 'string' && typeof n.lines === 'number'),
@@ -499,7 +499,7 @@ sessions._m.set(SID_G, sessionWith(SID_G, WS))
 console.log('reading another note by name')
 // The agent must be able to inspect note B while the card keeps showing note A.
 const activeBefore = (await tools.get('note_list').execute({}, { agent: { session: sessionWith(SID_A, WS) } })).active
-const otherSels = await tools.get('note_get_selections').execute({ note: '另一份' }, { agent: { session: sessionWith(SID_A, WS) } })
+const otherSels = await tools.get('note_mark_list').execute({ note: '另一份' }, { agent: { session: sessionWith(SID_A, WS) } })
 ok('selections of a named note can be read', Array.isArray(otherSels), JSON.stringify(otherSels && otherSels.length))
 const otherText = await tools.get('note_read').execute({ note: '另一份' }, { agent: { session: sessionWith(SID_A, WS) } })
 ok('the named note body can be read', /别的正文/.test(otherText.text), JSON.stringify(otherText && otherText.text.slice(0, 20)))
@@ -513,7 +513,7 @@ ok('a missing note name fails loudly', /没有名为/.test(missingErr), missingE
 
 console.log('every tool answers with a schema-valid success value')
 // The wrapper above only validates the tools this file actually calls, and most of them were
-// never called on a SUCCESS path — which is exactly how note_create and note_clear shipped
+// never called on a SUCCESS path — which is exactly how note_create and note_clear_keep_history shipped
 // returning no `error` on success while their output schema required it: the live harness
 // rejected those calls ("missing required property value.error") even though the note had
 // been created. Call every registered tool once, on the path that succeeds.
@@ -524,68 +524,71 @@ sessions._m.set(SID_D, sessionWith(SID_D, WS))
   await t('note_create', { name: '全量工具' })
   await t('note_write', { content: '# 全量工具\n第二行有内容\n第三行有内容\n' })
   await t('note_patch', { startLine: 2, startCol: 0, endLine: 2, endCol: 3, text: '第二行' })
-  await t('note_patch_many', { edits: [{ startLine: 3, startCol: 0, endLine: 3, endCol: 3, text: '第三行' }] })
+  // `note_patch_many` is a form of `note_patch` now (§P1-9): one description instead of two.
+  await t('note_patch', { edits: [{ startLine: 3, startCol: 0, endLine: 3, endCol: 3, text: '第三行' }] })
   await t('note_find', { query: '三行' })
-  const added = await t('note_add_selection', { startLine: 1, startCol: 0, endLine: 1, endCol: 6, color: 'pink' })
-  await t('note_set_remark', { id: added && added.id, remark: '工具写的备注' })
-  await t('note_set_style', { id: added && added.id, style: 'italic' })
-  const goto = await t('note_goto', { line: 3 })
-  ok('note_goto moves the card and is reported back', goto.ok === true && goto.line === 3 && typeof goto.anchor === 'string', JSON.stringify({ ok: goto.ok, line: goto.line }))
-  const gotoMark = await t('note_goto', { markId: added && added.id })
-  ok('note_goto can jump straight to a mark id',
+  const added = await t('note_mark_add', { startLine: 1, startCol: 0, endLine: 1, endCol: 6, color: 'pink' })
+  await t('note_mark_remark', { id: added && added.id, remark: '工具写的备注' })
+  await t('note_mark_style', { id: added && added.id, style: 'italic' })
+  const goto = await t('note_scroll_to', { line: 3 })
+  ok('note_scroll_to moves the card and is reported back', goto.ok === true && goto.line === 3 && typeof goto.anchor === 'string', JSON.stringify({ ok: goto.ok, line: goto.line }))
+  const gotoMark = await t('note_scroll_to', { markId: added && added.id })
+  ok('note_scroll_to can jump straight to a mark id',
     gotoMark.ok === true && gotoMark.line === 1 && gotoMark.markId === (added && added.id),
     JSON.stringify({ ok: gotoMark.ok, line: gotoMark.line, markId: gotoMark.markId }))
-  await t('note_goto', { line: 3 })
-  const lists0 = await t('note_lists', { action: 'create', name: '工具检查' })
-  ok('note_lists creates a named list', lists0.ok === true && lists0.lists.indexOf('《工具检查》') >= 0, lists0.lists.split('\n')[0])
-  const added1 = await t('note_lists', { action: 'add', name: '工具检查', markId: added && added.id, note: '全量工具' })
-  ok('note_lists adds a mark to it', added1.ok === true && /《工具检查》 1 条/.test(added1.lists), added1.lists.split('\n')[0])
-  const dupe = await t('note_lists', { action: 'add', name: '工具检查', markId: added && added.id, note: '全量工具' })
+  await t('note_scroll_to', { line: 3 })
+  const lists0 = await t('note_mark_lists', { action: 'create', name: '工具检查' })
+  ok('note_mark_lists creates a named list', lists0.ok === true && lists0.lists.indexOf('《工具检查》') >= 0, lists0.lists.split('\n')[0])
+  const added1 = await t('note_mark_lists', { action: 'add', name: '工具检查', markId: added && added.id, note: '全量工具' })
+  ok('note_mark_lists adds a mark to it', added1.ok === true && /《工具检查》 1 条/.test(added1.lists), added1.lists.split('\n')[0])
+  const dupe = await t('note_mark_lists', { action: 'add', name: '工具检查', markId: added && added.id, note: '全量工具' })
   ok('adding the same mark twice is a no-op, not a duplicate', dupe.ok === true && /《工具检查》 1 条/.test(dupe.lists), dupe.lists.split('\n')[0])
-  const bad = await t('note_lists', { action: 'add', name: '工具检查', markId: 'sel-nope' })
+  const bad = await t('note_mark_lists', { action: 'add', name: '工具检查', markId: 'sel-nope' })
   ok('adding a mark that does not exist is refused', bad.ok === false && /没有标记/.test(bad.error), bad.error)
-  await t('note_lists', { action: 'list' })
-  await t('note_lists', { action: 'remove', name: '工具检查', markId: added && added.id })
-  await t('note_lists', { action: 'rename', name: '工具检查', to: '工具检查2' })
-  await t('note_lists', { action: 'delete', name: '工具检查2' })
-  await t('note_ui', { action: 'open' })
-  await t('note_ui', { action: 'tab', tab: 'session' })
-  await t('note_ui', { action: 'focus', markId: added && added.id })
-  const uiCard = await t('note_ui', { action: 'card', markId: added && added.id })
-  ok('note_ui can raise the function card on a mark', uiCard.ok === true && uiCard.id > 0, JSON.stringify({ ok: uiCard.ok, id: uiCard.id }))
-  const uiCardBad = await t('note_ui', { action: 'card', markId: 'sel-nope' })
-  ok('note_ui refuses to raise a card on a mark that does not exist', uiCardBad.ok === false && /没有标记/.test(uiCardBad.error), uiCardBad.error)
-  const uiBadTab = await t('note_ui', { action: 'tab', tab: '不存在的视图' })
-  ok('note_ui refuses a view that does not exist', uiBadTab.ok === false && /没有这个视图/.test(uiBadTab.error), uiBadTab.error)
-  await t('note_ui', { action: 'float' })
-  await t('note_ui', { action: 'dock' })
-  await t('note_ui', { action: 'summon', on: true })
-  await t('note_ui', { action: 'close' })
-  const panel = await t('note_panel', { action: 'start' })
-  ok('note_panel summons the card', panel.ok === true && panel.summoned === true, JSON.stringify({ ok: panel.ok, summoned: panel.summoned }))
+  await t('note_mark_lists', { action: 'list' })
+  await t('note_mark_lists', { action: 'remove', name: '工具检查', markId: added && added.id })
+  await t('note_mark_lists', { action: 'rename', name: '工具检查', to: '工具检查2' })
+  await t('note_mark_lists', { action: 'delete', name: '工具检查2' })
+  await t('note_card_ui', { action: 'open' })
+  await t('note_card_ui', { action: 'tab', tab: 'session' })
+  await t('note_card_ui', { action: 'focus', markId: added && added.id })
+  const uiCard = await t('note_card_ui', { action: 'card', markId: added && added.id })
+  ok('note_card_ui can raise the function card on a mark', uiCard.ok === true && uiCard.id > 0, JSON.stringify({ ok: uiCard.ok, id: uiCard.id }))
+  const uiCardBad = await t('note_card_ui', { action: 'card', markId: 'sel-nope' })
+  ok('note_card_ui refuses to raise a card on a mark that does not exist', uiCardBad.ok === false && /没有标记/.test(uiCardBad.error), uiCardBad.error)
+  const uiBadTab = await t('note_card_ui', { action: 'tab', tab: '不存在的视图' })
+  ok('note_card_ui refuses a view that does not exist', uiBadTab.ok === false && /没有这个视图/.test(uiBadTab.error), uiBadTab.error)
+  await t('note_card_ui', { action: 'float' })
+  await t('note_card_ui', { action: 'dock' })
+  await t('note_card_ui', { action: 'summon', on: true })
+  await t('note_card_ui', { action: 'close' })
+  const panel = await t('note_card_panel', { action: 'start' })
+  ok('note_card_panel summons the card', panel.ok === true && panel.summoned === true, JSON.stringify({ ok: panel.ok, summoned: panel.summoned }))
   ok('note_list reports where the reader is in each note', (await t('note_list')).notes.every(function (n) { return typeof n.line === 'number' }), 'rows carry a line')
   const readAfterGoto = await t('note_read')
   ok('note_read tells the agent which line the user is on', readAfterGoto.viewLine === 3, JSON.stringify({ viewLine: readAfterGoto.viewLine }))
-  await t('note_get_selections')
-  await t('note_take_new_selections')
-  await t('note_set_color', { id: added && added.id, color: 'green' })
-  await t('note_remove_selection', { id: added && added.id })
-  await t('note_add_selection', { startLine: 1, startCol: 0, endLine: 1, endCol: 6, color: 'yellow' })
-  await t('note_clear_selections')
+  await t('note_mark_list')
+  await t('note_mark_new')
+  await t('note_mark_color', { id: added && added.id, color: 'green' })
+  await t('note_mark_remove', { id: added && added.id })
+  await t('note_mark_add', { startLine: 1, startCol: 0, endLine: 1, endCol: 6, color: 'yellow' })
+  await t('note_mark_clear')
   await t('note_commit', { message: 'tool check' })
-  await t('note_checkpoint', { message: 'tool check' })
+  // `note_checkpoint` folded into note_commit({reason}) (§P1-9): same operation, one description.
+  await t('note_commit', { reason: 'tool check (checkpoint form)' })
   await t('note_diag')
   await t('note_export', { to: WS + '/exported-toolcheck.md' })
   await t('note_read')
   await t('note_list')
   await t('note_open', { name: '全量工具' })
-  await t('note_import', { text: '导入\n', mode: 'append' })
+  await t('note_append', { text: '导入\n' })
+  await t('note_replace', { text: '# 全量工具\n第三行有内容\n' })
   await t('note_rename', { from: '全量工具', to: '全量工具2' })
-  await t('note_clear', { title: '全量工具2' })
-  await t('note_delete', { name: '全量工具2', confirm: true })
+  await t('note_clear_keep_history', { title: '全量工具2' })
+  await t('note_delete_forever', { name: '全量工具2', confirm: true })
   // The two asset tools: a one-file folder is enough to exercise the success path.
   writeFile(WS + '/toolcheck-src/only.md', '# 只有一个文件\n')
-  await t('note_import_folder', { dir: WS + '/toolcheck-src', files: ['only.md'] })
+  await t('note_folder_import', { dir: WS + '/toolcheck-src', files: ['only.md'] })
   await t('note_assets', { note: 'only' })
   await t('note_sync', { note: 'only' })
   // The increment protocol's two new tools (review §P0-2). note_status is the self-check; note_diff
@@ -604,7 +607,9 @@ const neverCalled = [...tools.keys()].filter((n) => !exercised.has(n))
 ok('every registered tool was exercised on a success path',
   neverCalled.length === 0,
   neverCalled.length ? 'never called: ' + neverCalled.join(',') : exercised.size + ' tools exercised')
-ok('the tool count still matches what the client and the docs expect', tools.size === 33, String(tools.size))
+// 33 → 32 in Phase 5: note_patch_many folded into note_patch({edits}) and note_checkpoint into
+// note_commit({reason}), while note_import split into note_append + note_replace (§P1-9).
+ok('the tool count still matches what the client and the docs expect', tools.size === 32, String(tools.size))
 
 console.log('every RPC handler answers')
 // One handler, clearSelections, was declared without its `args` parameter while its body used
@@ -724,9 +729,9 @@ sessions._m.set(SID_H, sessionWith(SID_H, WS))
   const stateFile = String(files.get(k(noteDirOf(SID_H, '备注') + '/.note-state.json')) || '')
   ok('the remark is persisted with the selection',
     stateFile.indexOf('这里我总记混') >= 0, stateFile.length + ' bytes')
-  // What the MODEL sees: the render function of note_get_selections, not the raw object.
-  const got = await asTool('note_get_selections', {}, SID_H)
-  const tool = tools.get('note_get_selections')
+  // What the MODEL sees: the render function of note_mark_list, not the raw object.
+  const got = await asTool('note_mark_list', {}, SID_H)
+  const tool = tools.get('note_mark_list')
   const rendered = tool.output.render({}, got).map((p) => p.text).join('\n')
   // Phase 1 of the review (§P0-1): the DEFAULT is a brief line — no remark text, no full quote. The
   // detail:"full" door still carries both, and that is what these two assertions pin down.
@@ -829,17 +834,17 @@ console.log('mark styles (colour, italic, underline — independent, all combina
   const group = (all.notes || []).find((g) => g.note === '样式') || {}
   const anyStyle = (group.marks || []).some((m) => m.italic === true || m.underline === true)
   ok('the session view carries the flags too', anyStyle === true, JSON.stringify((group.marks || []).map((m) => m.id + ':' + m.style)))
-  const styled = await asTool('note_set_style', { id: hl.id, italic: true }, SID_I)
-  ok('note_set_style toggles one flag', styled.style === 'italic' && styled.italic === true && styled.underline === false && styled.ok === true, JSON.stringify({ ok: styled.ok, style: styled.style }))
-  const styledBoth = await asTool('note_set_style', { id: hl.id, style: 'both' }, SID_I)
-  ok('note_set_style still accepts the legacy single value', styledBoth.style === 'italic+underline' && styledBoth.italic === true && styledBoth.underline === true, JSON.stringify({ style: styledBoth.style }))
-  const addedStyled = await asTool('note_add_selection', { startLine: 4, startCol: 0, endLine: 4, endCol: 5, italic: true, underline: true, color: 'pink' }, SID_I)
+  const styled = await asTool('note_mark_style', { id: hl.id, italic: true }, SID_I)
+  ok('note_mark_style toggles one flag', styled.style === 'italic' && styled.italic === true && styled.underline === false && styled.ok === true, JSON.stringify({ ok: styled.ok, style: styled.style }))
+  const styledBoth = await asTool('note_mark_style', { id: hl.id, style: 'both' }, SID_I)
+  ok('note_mark_style still accepts the legacy single value', styledBoth.style === 'italic+underline' && styledBoth.italic === true && styledBoth.underline === true, JSON.stringify({ style: styledBoth.style }))
+  const addedStyled = await asTool('note_mark_add', { startLine: 4, startCol: 0, endLine: 4, endCol: 5, italic: true, underline: true, color: 'pink' }, SID_I)
   const madeStyle = ((await r('state', { revision: -1 })).selections || []).find((s) => s.id === addedStyled.id) || {}
-  ok('note_add_selection can create a fully combined mark directly',
+  ok('note_mark_add can create a fully combined mark directly',
     madeStyle.italic === true && madeStyle.underline === true && madeStyle.color === 'pink',
     JSON.stringify({ style: madeStyle.style, color: madeStyle.color }))
-  const tool = tools.get('note_get_selections')
-  const rendered = tool.output.render({}, await asTool('note_get_selections', {}, SID_I)).map((p) => p.text).join('\n')
+  const tool = tools.get('note_mark_list')
+  const rendered = tool.output.render({}, await asTool('note_mark_list', {}, SID_I)).map((p) => p.text).join('\n')
   ok('the model is told which mark is italic and which is underlined',
     rendered.indexOf('·斜体') >= 0 && rendered.indexOf('·下划线') >= 0, rendered.split('\n').slice(0, 3).join(' | '))
 }
@@ -935,7 +940,7 @@ console.log('the asset mirror (folder import)')
   const rootId = scan.rootId
   ok('the asset root id is derived from the folder name + a path hash', typeof rootId === 'string' && /^docs-src-[0-9a-f]{8}$/.test(rootId), String(rootId))
 
-  const imp = await asTool('note_import_folder', { dir: srcDir, files: ['README.md', 'guide.md'] }, SID_AS)
+  const imp = await asTool('note_folder_import', { dir: srcDir, files: ['README.md', 'guide.md'] }, SID_AS)
   ok('importing a folder mirrors it and creates one note per selected .md',
     imp.ok === true && imp.files >= 5 && (imp.created.match(/✓/g) || []).length === 2,
     JSON.stringify({ files: imp.files, bytes: imp.bytes, created: imp.created.split('\n').length }))
@@ -966,7 +971,7 @@ console.log('the asset mirror (folder import)')
   ok('and the recorded size is a real number, so re-imports and the guard stay honest',
     (idx.roots || []).filter((x) => x.id === rootId)[0].bytes > 0,
     JSON.stringify((idx.roots || []).map((x) => x.id + ':' + x.bytes)))
-  const reuse = await asTool('note_import_folder', { dir: srcDir, files: ['guide.md'] }, SID_AS)
+  const reuse = await asTool('note_folder_import', { dir: srcDir, files: ['guide.md'] }, SID_AS)
   ok('importing the same folder again reuses the mirror instead of copying it again',
     reuse.ok === true && reuse.reused === true &&
     JSON.parse(String(files.get(k(WS + '/dsh-window/note/_assets/index.json')))).roots.filter((x) => x.id === rootId).length === 1,
@@ -995,11 +1000,11 @@ console.log('the asset mirror (folder import)')
   // Two folders holding a README.md used to fight over one note name (the second came back as
   // 已存在 and its content was dropped), and a link inside a nested document resolved against the
   // folder ROOT instead of the document's own folder.
-  const both = await asTool('note_import_folder', { dir: srcDir, files: ['README.md', 'sub/README.md'] }, SID_AS)
+  const both = await asTool('note_folder_import', { dir: srcDir, files: ['README.md', 'sub/README.md'] }, SID_AS)
   ok('two documents with the same file name become two notes (no silent loss)',
     both.ok === true && /《README》/.test(both.created) && /《sub-README》/.test(both.created), both.created.replace(/\n/g, ' | '))
   ok('a re-import of both is still idempotent',
-    (await asTool('note_import_folder', { dir: srcDir, files: ['README.md', 'sub/README.md'] }, SID_AS)).created.indexOf('✗') < 0)
+    (await asTool('note_folder_import', { dir: srcDir, files: ['README.md', 'sub/README.md'] }, SID_AS)).created.indexOf('✗') < 0)
   // 《sub-README》 is active now, and it lives in `sub/`: its `./deep/more.md` means `sub/deep/more.md`.
   const follow = await r('openMirrorDoc', { href: './deep/more.md' })
   ok('a link inside a nested document resolves against THAT document\'s folder',
@@ -1091,7 +1096,7 @@ console.log('the asset mirror (folder import)')
   const sync4 = await asTool('note_sync', { note: '没有来源' }, SID_AS)
   ok('syncing a note without an origin explains itself', sync4.ok === false && /没有可同步的来源/.test(sync4.error), sync4.error)
   // Importing a folder whose note already exists is NOT a failure (it says so and moves on).
-  const again = await asTool('note_import_folder', { dir: srcDir, files: ['README.md'] }, SID_AS)
+  const again = await asTool('note_folder_import', { dir: srcDir, files: ['README.md'] }, SID_AS)
   ok('re-importing an existing note is not reported as a failure',
     again.ok === true && /已存在/.test(again.created) && again.created.indexOf('✗') < 0,
     again.created.replace(/\n/g, ' | '))
@@ -1182,7 +1187,7 @@ console.log('the cost of polling a session with many notes')
   writeFile(bulkSrc + '/乙.md', '# 乙\n\n内容\n')
   writeFile(bulkSrc + '/sub/丙.md', '# 丙\n\n内容\n')
   const gitBeforeImport = gitCalls.length
-  const bulk = await asTool('note_import_folder', { dir: bulkSrc, files: ['甲.md', '乙.md', 'sub/丙.md'] }, SID_P)
+  const bulk = await asTool('note_folder_import', { dir: bulkSrc, files: ['甲.md', '乙.md', 'sub/丙.md'] }, SID_P)
   const importGit = gitCalls.length - gitBeforeImport
   ok('importing documents launches ZERO git processes (' + bulk.created.split('\n').length + ' notes)',
     bulk.ok === true && importGit === 0, importGit + ' git calls during the import')
@@ -1771,13 +1776,29 @@ console.log('the increment protocol: a one-line edit must not cost a full read (
   const afterFull = await t('note_status', {})
   ok('an explicit mode:"full" does move it, and then there is nothing unread',
     full.kind === 'full' && afterFull.changed === false, 'kind=' + full.kind + ' changed=' + afterFull.changed)
+  // The real case the review measured is a full-size note, and there the claim has a number: the
+  // increment channel's cost must be a function of the EDIT, not of the note (§P0-2).
+  const bytes = (s) => Buffer.byteLength(String(s), 'utf8')
+  const big = []
+  for (let i = 0; i < 240; i++) big.push('第 ' + (i + 1) + ' 行内容，把笔记撑到真实体量')
+  await t('note_create', { name: '增量大样本', text: '# 增量大样本\n' + big.join('\n') + '\n' })
+  const bigFull = render('note_read', {}, await t('note_read', {}))
+  await t('note_patch', { startLine: 100, startCol: 0, endLine: 100, endCol: 6, text: '第 100 行改过了' })
+  const bigStatus = render('note_status', {}, await t('note_status', {}))
+  const bigAuto = render('note_read', {}, await t('note_read', {}))
+  const bigHunks = render('note_diff', { format: 'hunks' }, await t('note_diff', { format: 'hunks' }))
+  const measured = { full: bytes(bigFull), status: bytes(bigStatus), auto: bytes(bigAuto), hunks: bytes(bigHunks) }
+  ok('on a 241-line note the increment channel costs a function of the edit, not of the note',
+    measured.full > 6000 && measured.status < 420 && measured.auto < 700 && measured.hunks < 700,
+    JSON.stringify(measured))
+  console.log('    measured  full=' + measured.full + ' B  note_status=' + measured.status + ' B  note_read(auto)=' + measured.auto + ' B  hunks=' + measured.hunks + ' B')
 }
 
 console.log('who made a mark — the agent\'s own marks never come back as the reader\'s (§P0-4)')
 {
   // Before this, every mark was anonymous: a mark the agent created while answering (or turned green
   // while closing a loop) was indistinguishable from a highlight the reader had just drawn, so the
-  // next `note_take_new_selections` fed the agent its own work back as if it were a user request.
+  // next `note_mark_new` fed the agent its own work back as if it were a user request.
   const SID_AU = 'session-author-3333'
   sessions._m.set(SID_AU, sessionWith(SID_AU, WS))
   const t = async (name, args) => await asTool(name, args, SID_AU)
@@ -1788,31 +1809,31 @@ console.log('who made a mark — the agent\'s own marks never come back as the r
   const dir = noteDirOf(SID_AU, '作者样本')
   await t('note_create', { name: '作者样本', text: '# 作者样本\n\n甲行\n乙行\n丙行\n' })
   const u = (await rpc('addSelection', { sessionId: SID_AU, startLine: 3, startCol: 0, endLine: 3, endCol: 2 })).result
-  const a = await t('note_add_selection', { startLine: 4, startCol: 0, endLine: 4, endCol: 2, color: 'green' })
+  const a = await t('note_mark_add', { startLine: 4, startCol: 0, endLine: 4, endCol: 2, color: 'green' })
   ok('a mark drawn in the card is the reader\'s and a mark added by the agent is not',
     u && u.ok === true && a && a.ok === true, JSON.stringify({ user: u && u.ok, agent: a && a.ok }))
-  const all = await t('note_get_selections', {})
+  const all = await t('note_mark_list', {})
   const authorOf = {}
   for (let i = 0; i < all.length; i++) authorOf[all[i].id] = all[i].author
   ok('every mark says who made it', authorOf[u.id] === 'user' && authorOf[a.id] === 'agent', JSON.stringify(authorOf))
-  const fresh = await t('note_take_new_selections', {})
+  const fresh = await t('note_mark_new', {})
   ok('the reader\'s highlight is delivered and the agent\'s own mark is NOT',
     fresh.length === 1 && fresh[0].id === u.id, JSON.stringify(fresh.map((s) => s.id)))
   ok('and the answer still says it is the reader\'s',
-    /用户新选中了 1 段/.test(render('note_take_new_selections', {}, fresh)), render('note_take_new_selections', {}, fresh).split('\n')[0])
-  const again = await t('note_take_new_selections', {})
+    /用户新选中了 1 段/.test(render('note_mark_new', {}, fresh)), render('note_mark_new', {}, fresh).split('\n')[0])
+  const again = await t('note_mark_new', {})
   ok('a highlight is consumed exactly once', again.length === 0, JSON.stringify(again))
-  const redo1 = await t('note_take_new_selections', { redeliver: true })
-  const redo2 = await t('note_take_new_selections', { redeliver: true })
+  const redo1 = await t('note_mark_new', { redeliver: true })
+  const redo2 = await t('note_mark_new', { redeliver: true })
   ok('redeliver hands the same highlight back again and again, without consuming it (§P0-2 re-alignment)',
     redo1.length === 1 && redo2.length === 1 && redo2[0].id === u.id,
     JSON.stringify([redo1.map((s) => s.id), redo2.map((s) => s.id)]))
   ok('and it says the answer includes already-delivered marks',
-    /redeliver/.test(render('note_take_new_selections', { redeliver: true }, redo1)), render('note_take_new_selections', { redeliver: true }, redo1).split('\n')[0])
-  const mine = await t('note_take_new_selections', { author: 'agent' })
+    /redeliver/.test(render('note_mark_new', { redeliver: true }, redo1)), render('note_mark_new', { redeliver: true }, redo1).split('\n')[0])
+  const mine = await t('note_mark_new', { author: 'agent' })
   ok('author:"agent" lists the agent\'s own marks',
     mine.length === 1 && mine[0].id === a.id, JSON.stringify(mine.map((s) => s.id)))
-  const afterFiltered = await t('note_take_new_selections', { redeliver: true })
+  const afterFiltered = await t('note_mark_new', { redeliver: true })
   ok('asking for the agent\'s marks never swallows the reader\'s',
     afterFiltered.length === 1 && afterFiltered[0].id === u.id, JSON.stringify(afterFiltered.map((s) => s.id)))
   // §P1-5: the mark state file is metadata, and `git add -A` used to commit it on every mark edit —
@@ -1852,14 +1873,14 @@ console.log('the context cost of every tool call (measured, with a baseline ratc
   // A note with the volume of a real one: 30 marks is what the review measured (≈4.6 KB per echo).
   await call('note_create', { name: '成本样本', text: '# 成本样本\n\n甲行内容\n乙行内容\n丙行内容\n' })
   for (let i = 0; i < 30; i++) {
-    await call('note_add_selection', { startLine: 3, startCol: 0, endLine: 3, endCol: 2, color: 'yellow', remark: '备注第 ' + i + ' 条，用真实量级的备注把返回体撑起来' })
+    await call('note_mark_add', { startLine: 3, startCol: 0, endLine: 3, endCol: 2, color: 'yellow', remark: '备注第 ' + i + ' 条，用真实量级的备注把返回体撑起来' })
   }
-  await call('note_get_selections', {})
-  await call('note_set_color', { id: 'sel-1', color: 'green' })
-  await call('note_set_remark', { id: 'sel-2', remark: '改过的备注' })
+  await call('note_mark_list', {})
+  await call('note_mark_color', { id: 'sel-1', color: 'green' })
+  await call('note_mark_remark', { id: 'sel-2', remark: '改过的备注' })
   await call('note_patch', { startLine: 3, startCol: 0, endLine: 3, endCol: 1, text: '甲甲' })
   await call('note_read', {})
-  await call('note_take_new_selections', {})
+  await call('note_mark_new', {})
   await call('note_list', {})
   await call('note_diag', {})
 
@@ -1874,15 +1895,15 @@ console.log('the context cost of every tool call (measured, with a baseline ratc
   // §7.3 budgets. A mark write has no business answering with anything but its own delta; a read is
   // exempt when it is EXPLICITLY a whole document, and cheap when it is not.
   const BUDGET = {
-    note_add_selection: 200, note_remove_selection: 200, note_set_color: 200, note_set_remark: 200,
-    note_set_style: 200, note_clear_selections: 200, note_patch: 300, note_patch_many: 400,
+    note_mark_add: 200, note_mark_remove: 200, note_mark_color: 200, note_mark_remark: 200,
+    note_mark_style: 200, note_mark_clear: 200, note_patch: 300,
     note_read: 700, note_list: 600, note_diag: 500, note_create: 400,
   }
   const over = Object.keys(per).filter((k) => BUDGET[k] !== undefined && per[k] > BUDGET[k])
   ok('every tool is inside its own return-body budget (§7.3)',
     over.length === 0, over.map((k) => k + ' ' + per[k] + 'B > ' + BUDGET[k] + 'B').join(', '))
   // With 30 marks on screen, brief must still be cheaper than the old full echo by an order of magnitude.
-  const briefThirty = per['note_get_selections'] || 0
+  const briefThirty = per['note_mark_list'] || 0
   ok('a brief listing of 30 marks costs a fraction of the old full echo (≈4.4 KB)',
     briefThirty > 0 && briefThirty < 3300, briefThirty + ' B for 30 marks')
 

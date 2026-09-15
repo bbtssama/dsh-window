@@ -135,14 +135,17 @@ systemPromptUp = true
 for (const listener of serviceListeners) listener.fn('webServer')
 ok('routes register once webServer appears', registeredRoutes.length === 3, String(registeredRoutes.length))
 ok('prompt section registers once systemPrompt appears', registeredSections.length === 1, String(registeredSections.length))
-ok('prompt section carries usage text', registeredSections[0] && typeof registeredSections[0].text === 'string' && registeredSections[0].text.includes('note_take_new_selections'), registeredSections[0] ? registeredSections[0].text.length + ' chars' : 'n/a')
+ok('prompt section carries usage text', registeredSections[0] && typeof registeredSections[0].text === 'string' && registeredSections[0].text.includes('note_mark_new'), registeredSections[0] ? registeredSections[0].text.length + ' chars' : 'n/a')
 // idempotent: a second appearance must not double-register
 for (const listener of serviceListeners) listener.fn('webServer')
 ok('re-firing the service event does not double-register', registeredRoutes.length === 3 && registeredSections.length === 1, registeredRoutes.length + '/' + registeredSections.length)
 
 const toolNames = registeredTools.map((tool) => tool.name).sort()
-const expectedTools = ['note_commit', 'note_get_selections', 'note_read', 'note_take_new_selections', 'note_write', 'note_list', 'note_create', 'note_open', 'note_clear', 'note_delete', 'note_rename', 'note_import', 'note_export']
+// The names are the §P1-9 converged surface: `note_` + one of note / mark / card / rev-delta,
+// one concept per name (note_append and note_replace are the old note_import's two halves).
+const expectedTools = ['note_commit', 'note_mark_list', 'note_read', 'note_mark_new', 'note_write', 'note_list', 'note_create', 'note_open', 'note_clear_keep_history', 'note_delete_forever', 'note_rename', 'note_append', 'note_replace', 'note_export', 'note_patch', 'note_diff', 'note_status', 'note_mark_lists', 'note_folder_import']
 ok('registers the note_* tools', expectedTools.every((name) => toolNames.includes(name)), toolNames.join(','))
+ok('and nothing but note_* tools', toolNames.every((name) => name.indexOf('note_') === 0), toolNames.filter((n) => n.indexOf('note_') !== 0).join(','))
 console.log('  tools : ' + toolNames.join(', '))
 ok('every tool has a JSON Schema + render', registeredTools.every((tool) => tool.parameters && tool.output && tool.output.schema && typeof tool.output.render === 'function'))
 
@@ -263,7 +266,7 @@ const leaked = retiredNames.filter((n) => new RegExp('\\b' + n + '\\b').test(hos
 ok('no retired identifier survives in shipped code', leaked.length === 0, leaked.join(','))
 
 ok('every note tool resolves its workspace explicitly and loudly',
-  (hostSource.match(/await enterFromTool\('note_/g) || []).length === 33,
+  (hostSource.match(/await enterFromTool\('note_/g) || []).length === 32,
   String((hostSource.match(/await enterFromTool\('note_/g) || []).length) + ' guarded tool entry points')
 
 // The panel and the host must agree on method names, and every note-space call must

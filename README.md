@@ -25,7 +25,7 @@ DSH Web GUI 的**悬浮 Markdown 笔记卡片**：会话隔离的多笔记空间
 dsh-window 的取舍是反过来的 —— **只有你划过的部分才会被送进上下文**：
 
 - 你划一段 → 存成一条「选中对象」（`{id, 行/列, 原文, 颜色, 备注, 是否已取用}`）；
-- 模型用 `note_take_new_selections` 只取**你新划的部分**，用 `note_read({fromLine, toLine})` 只读需要的窗口，而不是整篇；
+- 模型用 `note_mark_new` 只取**你新划的部分**，用 `note_read({fromLine, toLine})` 只读需要的窗口，而不是整篇；
 - 你写的**备注**和选中文本一起交给模型 —— 这是唯一携带"你自己的话"的字段，比任何颜色编码都准确；
 - 反过来，模型用 `note_write` / `note_patch` 写讲解，你就在旁边读，**不需要来回粘贴**。
 
@@ -58,7 +58,7 @@ dsh-window 的取舍是反过来的 —— **只有你划过的部分才会被�
 - **标记列表**是卡内面板，也可**拖动标题栏**成独立小窗（一次手势即拖出并继续拖，可缩放、位置与尺寸记住），这样长列表不再挤占笔记的正文高度。
 - 列表视图：**本笔记** / **本会话**（所有笔记的所有标记，点击跨笔记跳转）/ **任意多个自定义列表** —— 顶栏那颗按钮就是视图入口（点开切视图、新建/删除自定义列表、刷新）；行里的「添加到」把这条标记收进某个列表（或当场新建一个），在自定义列表里同一位置变成「移出」。每行最左侧的竖条同时显示**底色 + 斜体 I + 下划线 U**。列表面板自带 **✕** 关闭按钮；列表的**滚动位置会记住**，关闭再打开、刷新页面都回到原处。
 - 顶栏「点标记→列表」开关（**默认关**，插件级持久化）：开启后，单击标记文字会**自动呼出**悬浮标记列表并定位到该条；关闭时若列表已经打开，单击标记文字**仍然会定位**。
-- **agent 能操纵这套界面**：`note_ui` 可以打开/关闭列表、切视图、拖出/收回、改开关、把列表定位到某条标记；`note_panel` 能唤起/收起、折叠/展开卡片、切宽度。命令走 host 队列、卡片执行后按 id 回执，不会重复执行。
+- **agent 能操纵这套界面**：`note_card_ui` 可以打开/关闭列表、切视图、拖出/收回、改开关、把列表定位到某条标记；`note_card_panel` 能唤起/收起、折叠/展开卡片、切宽度。命令走 host 队列、卡片执行后按 id 回执，不会重复执行。
 - **长按 [标记]** 弹出输入框给这段写备注；短按仍是直接标记。备注会随标记一起交给模型。
 
 **渲染**
@@ -98,46 +98,53 @@ dsh plugin --profile <profile> add dsh-window
    其他子命令：`list` / `new <名字>` / `open <名字>`。
 2. 划重点：**长按**正文 → 拖两个圆点 → **[选中]**。
    想加一句话说明：**长按 [选中]**，在输入框里写完再点 [选中并保存]。
-3. 让模型讲：直接说「把刚才划的这段讲清楚，写进笔记」——它会用 `note_take_new_selections` 只拿你新划的部分，
+3. 让模型讲：直接说「把刚才划的这段讲清楚，写进笔记」——它会用 `note_mark_new` 只拿你新划的部分，
    用 `note_write`/`note_patch` 写到对应位置，而不是把整篇读一遍。
 
 ---
 
-## 模型工具（31 个）
+## 模型工具（32 个）
+
+命名收敛（评审 §P1-9）：前缀 `note_`，名词维度固定为 **`note`（笔记）/ `mark`（标记）/ `card`（卡片 UI）/ `rev`+`delta`（增量）**，
+一个概念只给一个名字。`note_patch_many` 已并入 `note_patch({edits})`、`note_checkpoint` 已并入 `note_commit({reason})`、
+`note_import` 拆成 `note_append` / `note_replace`。旧名**不保留别名窗口**：别名等于多一份每轮常驻的 description，
+与"工具面收窄"直接冲突 —— 这是本仓库对评审迁移策略的一处有意偏离。
 
 **读取（低上下文成本）**
 
 | 工具 | 用途 |
 | --- | --- |
-| `note_read` | 读正文，支持 `fromLine/toLine/padding` 只读窗口，也可按 `note` 名字读别的笔记而不动卡片 |
+| `note_read` | 读正文：`mode:auto`（默认，按基线只给增量）/ `window`（只读窗口，**不动基线**）/ `full`；也可按 `note` 读别的笔记而不动卡片 |
+| `note_status` | 一次调用回答"要不要读点东西"（≤0.4 KB）：rev / git / 行数 / 标记数 + 自上次读取以来的改动量 |
+| `note_diff` | 自基线的增量：`format: summary\|hunks\|marks`，`context` 控制上下文行，`since` 指定基线 |
 | `note_find` | 在笔记里搜子串，返回行号列号与上下文片段 |
-| `note_get_selections` | 取全部标记对象（含颜色、样式、备注、是否已取用、是否 stale） |
-| `note_take_new_selections` | 只取**用户新标**的部分（默认取完即标记已取用） |
-| `note_list` / `note_diag` / `note_export` | 列出本会话的笔记 / 诊断落盘与 git 状态 / 导出正文到文件 |
+| `note_mark_list` | 取标记（默认 **brief**：一行一条 + 前 30 字；`ids` 缩小范围，`detail:"full"` 才给备注与原文） |
+| `note_mark_new` | 只取**用户新标**的部分（默认 `author:"user"`，取完即标记已取用；`redeliver:true` 可反复领取且不消耗） |
+| `note_list` / `note_diag` / `note_export` | 列出本会话的笔记（带 `unread`）/ 诊断落盘 + git + 基线状态 / 导出正文到文件 |
 
 **写入**
 
 | 工具 | 用途 |
 | --- | --- |
 | `note_write` | 整篇覆盖 / 追加 / 前插 |
-| `note_patch` | 按 `startLine/startCol → endLine/endCol` 精确替换一段（首选，省上下文） |
-| `note_patch_many` | 一次改多处 |
-| `note_commit` / `note_checkpoint` | 提交到该笔记的 git（检查点用于长任务回溯） |
+| `note_patch` | 按 `startLine/startCol → endLine/endCol` 精确替换一段（首选，省上下文）；多处一起改给 `edits:[…]`（内部从后往前应用） |
+| `note_commit` | 提交到该笔记的 git（`reason` 写进提交信息，长任务检查点用它；自动信息带 `+/- ` 行数与标记数） |
+| `note_append` / `note_replace` | 把外部内容追加到末尾 / 覆盖正文（`from=<文件>` 或 `text=<内容>`） |
 
 **标记与笔记管理**
 
 | 工具 | 用途 |
 | --- | --- |
-| `note_add_selection` | 由 agent 新建标记（可带 `color`、`italic`、`underline`、`remark`），三种手段可以一起给 |
-| `note_remove_selection` / `note_clear_selections` / `note_set_color` | 删除 / 清空 / 改颜色（绿=已处理，黑=遮盖，none=不铺底） |
-| `note_set_style` | 独立开关斜体 / 下划线（`italic`、`underline` 各给各的；也给得了旧的 `style: highlight/italic/underline/both`） |
-| `note_set_remark` | 写或清除某条标记的备注（用户长按 [标记] 写的就是这个字段） |
-| `note_import_folder` | 把一个**文件夹整目录镜像**进 `note/_assets/`，并为选中的每个 `.md` 各建一份笔记（同一目录共享一份镜像，不重复复制） |
+| `note_mark_add` | 由 agent 新建标记（可带 `color`、`italic`、`underline`、`remark`），三种手段可以一起给；归属记为 `agent` |
+| `note_mark_remove` / `note_mark_clear` / `note_mark_color` | 删除 / 清空 / 改颜色（绿=已处理，黑=遮盖，none=不铺底） |
+| `note_mark_style` | 独立开关斜体 / 下划线（`italic`、`underline` 各给各的；也给得了旧的 `style: highlight/italic/underline/both`） |
+| `note_mark_remark` | 写或清除某条标记的备注（用户长按 [标记] 写的就是这个字段） |
+| `note_folder_import` | 把一个**文件夹整目录镜像**进 `note/_assets/`，并为选中的每个 `.md` 各建一份笔记（同一目录共享一份镜像，不重复复制） |
 | `note_assets` | 看当前笔记的素材根、来源目录、镜像的文件数/字节数，以及本会话的所有素材根 |
-| `note_lists` | 自定义标记列表：`list`（看全部）/ `create` / `rename` / `delete` / `add` / `remove`，能把任意笔记里的任意标记收进一个命名列表 |
-| `note_ui` | 操纵卡片的标记列表界面：`open` / `close` / `tab` / `float` / `dock` / `summon` / `focus`（定位到某条标记）/ `refresh` |
-| `note_goto` / `note_panel` | 跳到某行**或某条标记**（`markId`）；唤起/收起/折叠/展开卡片、切宽度档位 |
-| `note_create` / `note_open` / `note_rename` / `note_clear` / `note_delete` / `note_import` | 新建（可来自文件/内容）/ 切换 / 重命名 / 清空正文（保留历史）/ 删除整份（含 git）/ 导入追加 |
+| `note_mark_lists` | 自定义标记列表：`list`（看全部）/ `create` / `rename` / `delete` / `add` / `remove` |
+| `note_card_ui` | 操纵卡片的标记列表界面：`open` / `close` / `tab` / `float` / `dock` / `summon` / `focus`（定位到某条标记）/ `refresh` |
+| `note_scroll_to` / `note_card_panel` | 跳到某行**或某条标记**（`markId`）；唤起/收起/折叠/展开卡片、切宽度档位 |
+| `note_create` / `note_open` / `note_rename` / `note_clear_keep_history` / `note_delete_forever` | 新建（可来自文件/内容，建好即建仓并回报 `gitReady`）/ 切换 / 重命名 / 清空正文（保留历史）/ 删除整份（含 git） |
 
 给模型的那份文本里，每条标记对象长这样（`【备注】`就是用户自己写的话，斜体/下划线会标注出来）：
 
@@ -171,13 +178,13 @@ dsh plugin --profile <profile> add dsh-window
 
 | 主题 | 由谁产生 | 卡片刷新什么 |
 | --- | --- | --- |
-| `text` | `note_write` `note_patch` `note_patch_many` `note_import` `note_clear` `note_open`（以及卡片自己的编辑落盘） | 正文（阅读位置保持不变） |
-| `marks` | 任何改标记的调用（`addSelection` / `note_set_color` / `note_set_style` / `note_set_remark` / 删除 / 清空 / 取用） | 标记底色与斜体下划线、标记列表行 |
+| `text` | `note_write` `note_patch` `note_patch_many` `note_import` `note_clear_keep_history` `note_open`（以及卡片自己的编辑落盘） | 正文（阅读位置保持不变） |
+| `marks` | 任何改标记的调用（`addSelection` / `note_mark_color` / `note_mark_style` / `note_mark_remark` / 删除 / 清空 / 取用） | 标记底色与斜体下划线、标记列表行 |
 | `notes` | 新建 / 重命名 / 删除 / 切换笔记 | 笔记选择器 |
-| `lists` | `note_lists` 与卡片上的「添加到 / 移出 / 新建 / 删除」 | 自定义列表与视图入口 |
-| `view` | `note_goto`（以及任何带 `jump` 的阅读位置请求） | 卡片真的滚到那一行（按行文本重新锚定） |
+| `lists` | `note_mark_lists` 与卡片上的「添加到 / 移出 / 新建 / 删除」 | 自定义列表与视图入口 |
+| `view` | `note_scroll_to`（以及任何带 `jump` 的阅读位置请求） | 卡片真的滚到那一行（按行文本重新锚定） |
 | `git` | `note_commit` / `note_checkpoint` | 底栏的 commit 号 |
-| `ui` | `note_ui` / `note_panel` 的命令 | 执行那条界面命令（按 id 回执，不重复执行） |
+| `ui` | `note_card_ui` / `note_card_panel` 的命令 | 执行那条界面命令（按 id 回执，不重复执行） |
 
 事件**搭在已有的 state 轮询上**返回（不新开通道），并且**不会被 `unchanged` 短路**：只有当"两个 revision 都没变**且**没有新事件"时，host 才回那个最省流量的答复。
 卡片可见且有焦点时轮询间隔 **0.7s**，切到后台 2.6s，所以 agent 的一次 `note_patch` 几乎是立刻出现在眼前。
@@ -236,7 +243,7 @@ node src/verify-reanchor.mjs    # 重新锚定：外部编辑后选中对象如�
 守卫数、以及"shipped 代码里不得出现退役标识符"。它们不是形式主义 —— 每一条都对应一次真实事故：
 
 - **`defineTool` 会编译 schema**：属性级 `required: true` 被搬进顶层 `required: [...]` 数组，运行时校验的是那个数组。
-  只读属性级标记的检查器会把每个字段都当可选 —— `note_create` / `note_clear` 就是这样带着"成功返回缺字段"的问题出厂的
+  只读属性级标记的检查器会把每个字段都当可选 —— `note_create` / `note_clear_keep_history` 就是这样带着"成功返回缺字段"的问题出厂的
   （真实 harness 拒收，而笔记其实建好了）。现在校验器两种形式都认，并且**每个注册的工具都至少被成功调用一次**。
 - **RPC handler 少写一个形参就是"点了没反应"**：`clearSelections` 曾经是唯一一个写成 `async function ()`
   却用 `args` 的 handler，每次调用都抛错；而客户端只认 `ok:true`、又没有 `.catch`，于是按钮既不生效也不报错

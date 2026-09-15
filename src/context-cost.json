@@ -3,13 +3,13 @@
   "total": 7192,
   "tools": {
     "note_create": 127,
-    "note_add_selection": 46,
-    "note_get_selections": 2447,
-    "note_set_color": 34,
-    "note_set_remark": 52,
+    "note_mark_add": 46,
+    "note_mark_list": 2447,
+    "note_mark_color": 34,
+    "note_mark_remark": 52,
     "note_patch": 60,
     "note_read": 244,
-    "note_take_new_selections": 2408,
+    "note_mark_new": 2408,
     "note_list": 157,
     "note_diag": 307
   }

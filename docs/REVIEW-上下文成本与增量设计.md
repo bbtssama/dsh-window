@@ -762,3 +762,61 @@ verify-durability` 全绿。
 
 **遵守报告自己的规矩**：本阶段**只改行为、不改名字**（报告 §P1-9 明确要求"绝不同时改行为与名字"），
 所以 `/P0-3` 的铁律文本里暂时写的仍是现名；Phase 5 改名时同步更新这一段提示词。
+
+## Phase 2 · 增量协议（已完成，`fd978e7`）
+
+**协议落地**（报告 §7.1 / §P0-2）
+
+1. **基线**存两处：`.note-state.json` 里的 `lastRead = {rev, sha, at, lines, chars, markIds}`，
+   以及正文**快照** `<sessionRoot>/.bases/<笔记名>.md`（放在内容仓库**之外**，不进任何 git 历史）。
+   `sha` 由 `contentHashOf()` 给出（FNV-1a over 空白归一化文本 + 长度），因此"只改了空格"不会被算成改动。
+2. **`note_status`**（新）：≤0.4 KB 回答"要不要读点东西" —— rev / git / 行数 / 标记数 / 自上次读取的
+   `+N/-M 行, 标记 +a/-b (rev X)`，无改动就明确写"无改动"。
+3. **`note_diff`**（新）：`format: summary | hunks | marks`，`context` 控制上下文行、`since` 可指定基线 rev；
+   `hunks` 是自研 `lineDiffOf`（前缀/后缀裁剪 + LCS DP，超过 `maxCells` 退化为整块替换）→ `hunksOf` → 渲染。
+4. **`note_read`**：新增 `mode: auto | window | full`。`auto` 按基线自己判断：首次读全文（`auto-first`）、
+   无改动（`auto-same`）、有改动只给增量（`auto-changed`）；**`window` 读取不动基线**（只开个窗口 ≠ 看完了全文），
+   只有 `full` 才推进基线。
+5. `note_list` 带 `unread`（只给当前打开的那一份：给 160 份笔记逐一算差值是 O(160) 次全文比对，不值）；
+   `note_diag` 增加 `rev/git/dirty/lines/chars/contentSha/marks/unread/baseRev/baseAt`；
+   每轮注入的 `dsh_window_note_scope` 变量带上这份粗粒度摘要（提示词变量 provider 是同步的、拿不到快照，
+   所以它只报缓存值 —— 这是**已知偏差**，已在下面记明）。
+
+**实测（`verify-notes.mjs` 的增量验收段，241 行的笔记，改 1 行）**
+
+| 通道 | 字节 |
+|---|---|
+| 首次全文读取 `note_read` | 13278 B |
+| 改 1 行后 `note_status` | **221 B** |
+| 改 1 行后 `note_read({mode:"auto"})` | **298 B** |
+| 改 1 行后 `note_diff({format:"hunks"})` | **184 B** |
+
+→ 同一件事从 13278 B 降到 ≈200–300 B，且**与笔记大小无关**：成本只看改动量。这条已写成断言
+（`full > 6000 && status < 420 && auto < 700 && hunks < 700`），不是"感觉省了"。
+
+## Phase 3 · 标记归属 + 提交信息带 delta（已完成，`76911cc`）
+
+1. **§P0-4 标记归属**：每条标记记 `author: 'user' | 'agent'`。`note_add_selection`（agent 自己加的）盖 `agent` 章，
+   卡片里用户手划的（RPC `addSelection`）是 `user`。`SEL_ITEM` 暴露该字段。
+2. **`note_take_new_selections` 默认只取 `user` 的**：此前 agent 为"闭环"新建的标记会在下一轮被当成
+   "用户刚划的重点"喂回来，等于自己给自己发指令。现在默认过滤，且新增两个参数：
+   `author: user|agent|all`、`redeliver: true`（把**已取用过**的再给一次且**不消耗**取用状态 —— 上下文被压缩后
+   重新对齐用；同时，查询 agent 标记不再会顺手吞掉用户还没读过的标记）。
+3. **§P1-6 提交信息**：自动提交信息由"时间戳"改为
+   `note(content): <git diff --shortstat HEAD 的结果 或 first commit>, 标记 N 条 (rev M)` ——
+   一次 `git log` 就能知道改动量级，不必再调工具；调用方显式给的信息（`note(ai): …`）原样保留。
+
+## Phase 4 · 状态文件出 git + `note_create` 立即建仓（已完成，`76911cc`）
+
+1. **§P1-5**：`.note-state.json` 与 `.note-view.json` 一起进笔记仓库的 `.gitignore`；仍在被跟踪的旧仓库
+   会**迁移一次**（`git rm --cached` + 一条迁移提交），迁移结果记在状态文件里 —— 所以这次探测是
+   "每份笔记一辈子一次"，不是每次切换笔记一次。此前每改一次标记就会产生一个 23 KB 的"内容提交"，
+   提交信息还写着"note: ..."，真实内容历史被淹没。
+2. **§P1-7**：`note_create` **工具**现在立即为这份新笔记建仓并回报 `gitReady: true`（建仓后紧接着跑
+   `.gitignore` 迁移检查）。此前它和导入一样延迟建仓，导致刚成功的 `note_create` 后面跟一个
+   `note_diag` 会看到 `gitReady:false` —— 和"仓库坏了"无法区分。
+   其余创建路径（卡片「新建」按钮的 `createNote` RPC、文件夹批量导入）**保持延迟**：一次导入 156 份文档
+   建 156 个仓库正是让机器卡死的原因，对应的"导入 0 次 git 进程"断言仍然绿。
+
+**本阶段新增断言**：`verify-notes.mjs` 323 条（+12：归属/取用/redeliver/忽略规则/迁移/`gitReady`），
+四个套件（selftest / verify-notes / verify-reanchor / verify-durability）全绿。
