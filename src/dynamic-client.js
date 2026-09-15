@@ -1268,6 +1268,18 @@ return {
        * host reported, a 后退/前进, and a note change — and nowhere else: this is a storage write, and
        * the card re-renders every 700ms.
        */
+      /**
+       * Put the line being read onto the entry the cursor is on. Called when a session is left and
+       * when the page goes away — a plain scroll never touches the stack, so without this the entry
+       * keeps an older recorded line (or the 0 of a note that was only just opened).
+       */
+      function stampNavLine(line) {
+        const at = navRef.current.at
+        if (!(Math.round(Number(line)) >= 1) || at < 0 || !navRef.current.list[at]) return
+        const list = navRef.current.list.slice()
+        list[at] = { name: list[at].name, line: Math.round(Number(line)) }
+        navRef.current = { list: list, at: at }
+      }
       function saveNavNow() {
         const live = String(navSidRef.current || '')
         const store = Object.assign({}, navBySidRef.current)
@@ -1449,16 +1461,9 @@ return {
         restoredForRef.current = ''
         pendingViewRef.current = null
         viewSavedRef.current = { line: 0, note: '' }
-        // Leaving the session is also leaving the entry you are on: stamp the line you are reading
-        // RIGHT NOW onto it, measured live (a plain scroll never touches the stack). Without this a
-        // session parked after reading — no jump, just reading — came back with an entry whose line
-        // was 0, and 前进/后退 would only open the note.
-        const leaveLine = topVisibleLine()
-        if (leaveLine >= 1 && navRef.current.at >= 0 && navRef.current.list[navRef.current.at]) {
-          const stamped = navRef.current.list.slice()
-          stamped[navRef.current.at] = { name: stamped[navRef.current.at].name, line: leaveLine }
-          navRef.current = { list: stamped, at: navRef.current.at }
-        }
+        // Leaving the session is also leaving the entry you are on, so the line being read right now
+        // goes onto it (measured live: a plain scroll never touches the stack).
+        stampNavLine(topVisibleLine())
         // The visit history belongs to the session being left, not to this one: park it and pick up
         // this session's own. The stacks are PERSISTED, so closing the page (or reloading it) does
         // not lose them; a record nobody has touched for a day is CLEARED rather than loaded (see
@@ -1499,6 +1504,17 @@ return {
           else if (!(res && res.ok)) notify('《' + r.note + '》的未保存改动写入失败')
         }).catch(function () { notify('《' + r.note + '》的未保存改动写入失败') })
       }, [shownSessionId])
+      // The page going away is leaving the entry you are on, exactly like a session switch. A reload
+      // does not run React cleanups, so this is the page's own event; the listener is removed with
+      // the card. Without it the persisted stack kept the older line and 前进 came back to it.
+      React.useEffect(function () {
+        const stamp = function () {
+          stampNavLine(topVisibleLine())
+          saveNavNow()
+        }
+        window.addEventListener('pagehide', stamp)
+        return function () { try { window.removeEventListener('pagehide', stamp) } catch (err) { } }
+      }, [])
       // A dead entry is what "点了不跳转" means, so a stack is pruned against the note list of the
       // session it belongs to as soon as that list is known. A NON-EMPTY list is required: an empty
       // one means "no answer yet", and pruning then would wipe a stack that is still perfectly good.

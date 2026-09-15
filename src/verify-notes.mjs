@@ -1385,18 +1385,19 @@ console.log('the history is wired into the real paths, not just written')
     /navPackStore\(map, Date\.now\(\), NAV_TTL_MS\)/.test(flat), 'writeNavStore')
   ok('the live session\'s stack is stamped each time it is saved, parked ones keep their own clock',
     /store\[live\] = \{ list: navRef\.current\.list, at: navRef\.current\.at, ts: Date\.now\(\) \}/.test(flat), 'saveNavNow')
-  ok('the stacks are persisted from every place that changes one (6 call sites, exactly one definition)',
-    (flat.match(/saveNavNow\(\)/g) || []).length === 7 && (flat.match(/function saveNavNow\(\)/g) || []).length === 1,
+  ok('the stacks are persisted from every place that changes one (7 call sites, exactly one definition)',
+    (flat.match(/saveNavNow\(\)/g) || []).length === 8 && (flat.match(/function saveNavNow\(\)/g) || []).length === 1,
     String((flat.match(/saveNavNow\(\)/g) || []).length) + ' occurrences of saveNavNow()')
   ok('a stack is pruned against the note list, and an empty list is never taken for "no notes"',
     /if \(navNamesKey === ''\) return/.test(flat) &&
     /const pruned = navPrune\(navRef\.current, navNamesKey\.split\('\\u0000'\)\)/.test(flat), 'prune effect')
   // Every entry is { name, line }, and the line has to be there for 后退/前进 to come back to a
-  // paragraph rather than to the top of a note. A jump writes it (navRecordJump); leaving a session
-  // is leaving the entry too, so the line being read right now is stamped there as well.
-  ok('the line being read is stamped onto the entry when a session is left',
-    /const leaveLine = topVisibleLine\(\)/.test(flat) &&
-    /stamped\[navRef\.current\.at\] = \{ name: stamped\[navRef\.current\.at\]\.name, line: leaveLine \}/.test(flat), 'park-time stamp')
+  // paragraph rather than to the top of a note. A jump writes it (navRecordJump); leaving a session,
+  // and the page going away, are leaving the entry too, so the line being read is stamped there.
+  ok('the line being read is stamped onto the entry the cursor is on (session left, page going away)',
+    (flat.match(/stampNavLine\(topVisibleLine\(\)\)/g) || []).length === 2 &&
+    /window\.addEventListener\('pagehide', stamp\)/.test(flat) &&
+    /function stampNavLine\(line\)/.test(flat), 'two call sites + the helper')
   ok('and the entries keep their line through the storage round trip',
     /list\.push\(\{ name: e\.name, line: Math\.round\(Number\(e\.line\)\) \|\| 0 \}\)/.test(flat) &&
     /return \{ nav: \{ list: rec\.list\.slice\(\), at: at \}, expired: false \}/.test(flat), 'navReadStore + navFromStore')
