@@ -222,6 +222,8 @@ const CSS = [
 '.dn-mark-top{display:flex;align-items:center;gap:6px;font-size:10.5px;color:#8a8f98;flex-wrap:wrap;}',
 '.dn-mark-where{color:#6b7280;white-space:nowrap;}',
 '.dn-mark-badge{border:1px solid rgba(0,0,0,.12);border-radius:999px;padding:0 6px;white-space:nowrap;}',
+'.dn-badge-btn{cursor:pointer;font:inherit;background:transparent;}',
+'.dn-badge-btn:hover{background:rgba(216,128,0,.14);}',
 '.dn-badge-warn{border-color:rgba(216,128,0,.5);color:#d80;}',
 // The actions are buttons with Chinese labels: they must never be squeezed into one character
 // per line (that is what a narrow card did to 展开 / 样式 / 添加到 / 备注 / 删除). They keep their
@@ -2770,6 +2772,79 @@ return {
         }).catch(function (err) { notify('改不了这条标记: ' + ((err && err.message) || String(err))) })
       }
       /** Copy a mark's text to the clipboard, with a fallback for a non-secure context. */
+      /* STALE-PURE-START */
+      /**
+       * The text 【恢复原文】 writes: the text this mark remembered, spliced in at the range the mark
+       * has RIGHT NOW — which is exactly where its orange band is drawn, so this is WYSIWYG. Returns
+       * null when the range already holds that text, so the caller can say so instead of writing the
+       * file again. Pure (no refs, no state), and the suite drives it directly.
+       */
+      function staleRestoreText(text, m) {
+        const src = String(text === undefined || text === null ? '' : text)
+        const saved = String((m && m.text) || '')
+        if (saved === '') return null
+        const lines = src.split(String.fromCharCode(10))
+        const offsets = [0]
+        for (let i = 0; i < lines.length; i++) offsets.push(offsets[i] + lines[i].length + 1)
+        const clampLine = function (ln) { return Math.min(Math.max(1, Math.round(Number(ln)) || 1), lines.length) }
+        const at = function (ln, col) {
+          const L = clampLine(ln)
+          const c = Math.min(Math.max(0, Math.round(Number(col)) || 0), lines[L - 1].length)
+          return offsets[L - 1] + c
+        }
+        const a = at(m && m.startLine, m && m.startCol)
+        const b = at(m && m.endLine, m && m.endCol)
+        const lo = Math.min(a, b), hi = Math.max(a, b)
+        if (src.slice(lo, hi) === saved) return null
+        return src.slice(0, lo) + saved + src.slice(hi)
+      }
+      /* STALE-PURE-END */
+      /**
+       * 【恢复原文】: write the text this mark remembered back where the mark now is. The host
+       * re-anchors on every save, so bringing the text back is what clears `stale` — and it IS an
+       * edit of the note, which is the point of the button (git keeps the previous state).
+       */
+      function restoreStaleText(m) {
+        if (!m || !m.id) return
+        const next = staleRestoreText(String(textRef.current || ''), m)
+        setMcard(null)
+        if (next === null) { notify('这段原文已经在原位了，没有要改的'); return }
+        setBusy('恢复原文')
+        host.call('saveText', { text: next, baseRevision: revRef.current, sessionId: sidRef.current }).then(function (r) {
+          setBusy('')
+          if (r && r.conflict) { notify('笔记已被外部改动，本次未写入；请先[重载]再试'); return }
+          if (r && r.ok) {
+            revRef.current = r.revision
+            textRef.current = next
+            setSt(function (prev) { return prev ? Object.assign({}, prev, { text: next, revision: r.revision, lineCount: r.lineCount, selections: r.selections, savedAt: r.savedAt }) : prev })
+            if (!dirtyRef.current) { draftRef.current = next; setDraft(next) }
+            bump()
+            notify('已把这段原文写回去，标记回到原位')
+            return
+          }
+          notify('恢复原文失败: ' + ((r && r.error) || '未知错误'))
+        }).catch(function (err) { setBusy(''); notify('恢复原文失败: ' + ((err && err.message) || String(err))) })
+      }
+      /**
+       * 【确认变动】: accept the note as it stands. The mark keeps its range, adopts the text under
+       * it and stops being `stale`. The note itself is NOT touched.
+       */
+      function confirmStaleMark(m) {
+        if (!m || !m.id) return
+        setMcard(null)
+        setBusy('确认中')
+        host.call('confirmSelection', { sessionId: sidRef.current, id: m.id }).then(function (r) {
+          setBusy('')
+          if (r && r.ok) {
+            revRef.current = r.revision
+            setSt(function (prev) { return prev ? Object.assign({}, prev, { revision: r.revision, selections: r.selections }) : prev })
+            bump()
+            notify('已确认：这条标记就盖住现在这段文字')
+            return
+          }
+          notify('确认失败: ' + ((r && r.error) || '未知原因'))
+        }).catch(function (err) { setBusy(''); notify('确认失败: ' + ((err && err.message) || String(err))) })
+      }
       function copyMarkText(m) {
         const text = String((m && m.text) || '')
         if (text === '') { notify('这条标记没有文字'); return }
@@ -4548,7 +4623,22 @@ return {
             color === 'none' ? h('span', { className: 'dn-mark-badge', key: 'nc' }, '无色') : null,
             look.italic ? h('span', { className: 'dn-mark-badge', key: 'si' }, '斜体') : null,
             look.underline ? h('span', { className: 'dn-mark-badge', key: 'su' }, '下划线') : null,
-            m.stale ? h('span', { className: 'dn-mark-badge dn-badge-warn', key: 'st' }, '原文已变动') : null,
+            // The badge is the way IN to the two repair actions. It is a plain badge for a mark of
+            // another note (the session view): those actions write to the note on screen, and this
+            // row cannot reach that one.
+            m.stale ? (cross || listName
+              ? h('span', { className: 'dn-mark-badge dn-badge-warn', key: 'st', title: '原文已变动：这段文字被改过，卡片无法确定它现在盖住哪些字' }, '原文已变动')
+              : h('button', {
+                className: 'dn-mark-badge dn-badge-warn dn-badge-btn', key: 'st', type: 'button', 'data-menu-opener': 'stale',
+                title: '原文已变动：点这里可以【恢复原文】或【确认变动】',
+                onClick: function (e) {
+                  e.stopPropagation()
+                  if (mcard && mcard.id === m.id) { setMcard(null); return }
+                  const r = e.currentTarget.getBoundingClientRect()
+                  const at = cardPoint(r.left, r.bottom + 6)
+                  setMcard({ id: m.id, x: at.x, y: at.y, from: 'list' })
+                },
+              }, '原文已变动')) : null,
             h('span', { className: 'dn-mark-badge', key: 'f' }, m.fetched ? '已取用' : '新'),
             h('span', { className: 'dn-mark-acts', key: 'a' }, [
               h('button', {
@@ -4727,6 +4817,10 @@ return {
         }
         return flat.length ? flat[0] : null
       })() : null
+      // The two stale actions write to the note ON SCREEN, so they are offered only for a mark that
+      // belongs to it: `selList` is this note's marks, while `cardMark` can also come from the
+      // session-wide list (or the agent's card command) and then points at another note entirely.
+      const cardMarkHere = !!(cardMark && selList.filter(function (x) { return x.id === cardMark.id }).length > 0)
       // ── the 添加到 popover, and the ＋ popover that creates a list ────────────────────
       // One small panel for both: pick an existing list (one click adds the mark), or type a
       // name and get a new list with the mark already inside it.
@@ -4981,6 +5075,13 @@ return {
           // No 跳到 here: the card only opens on a passage the reader just clicked, so they are
           // already looking at that line. The list dropped it for the same reason (its rows jump
           // when clicked).
+          // The two repair actions for a mark whose text moved under it. Primary, because when the
+          // reader opens the card from the warning badge these are what they came for.
+          cardMark && cardMark.stale && cardMarkHere ? h('div', { className: 'dn-mcard-row', key: 'stale' }, [
+            h('span', { key: 'l', style: { color: '#b45309', fontSize: '11px' } }, '原文已变动'),
+            h('button', { className: 'dn-mcard-btn', key: 'rs', 'data-primary': '1', title: '把这条标记当时记下的原文写回笔记（会改动笔记内容，git 里可恢复）', onClick: function () { restoreStaleText(cardMark) } }, '恢复原文'),
+            h('button', { className: 'dn-mcard-btn', key: 'cf', title: '不改笔记：标记就留在现在这个位置，把当前文字记成它的原文' , onClick: function () { confirmStaleMark(cardMark) } }, '确认变动'),
+          ]) : null,
           h('div', { className: 'dn-mcard-row', key: 'acts' }, [
             h('button', { className: 'dn-mcard-btn', key: 'copy', title: '复制这条标记的文字', onClick: function () { copyMarkText(cardMark) } }, '复制'),
             h('button', { className: 'dn-mcard-btn', key: 'rm', title: cardMark && cardMark.remark ? '查看/修改备注' : '给这条标记写备注', onClick: function () { remarkFromCard(cardMark) } }, cardMark && cardMark.remark ? '改备注' : '备注'),

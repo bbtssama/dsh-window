@@ -1403,6 +1403,23 @@ console.log('the history is wired into the real paths, not just written')
   ok('the editor and the live selection of the session just left are dropped with it',
     /setLive\(null\); setMagnify\(null\); setEditBlock\(null\); editBlockRef\.current = null; hideBar\(\)/.test(flat) &&
     /if \(mode === 'edit'\) setMode\('read'\)/.test(flat), 'session-change effect')
+  // 「原文已变动」 is the way IN to the two repair actions: the badge opens the mark's function card,
+  // whose first row offers 恢复原文 (an edit of the note) and 确认变动 (a change of the mark only).
+  ok('the 原文已变动 badge is the button that opens the repair card',
+    /'data-menu-opener': 'stale'/.test(flat) && /'原文已变动：点这里可以【恢复原文】或【确认变动】'/.test(flat), 'badge')
+  ok('and that card offers both actions, for a mark of the note on screen only',
+    /cardMark && cardMark\.stale && cardMarkHere \? h\('div', \{ className: 'dn-mcard-row', key: 'stale' \}/.test(flat) &&
+    /restoreStaleText\(cardMark\)/.test(flat) && /confirmStaleMark\(cardMark\)/.test(flat) &&
+    /const cardMarkHere = !!\(cardMark && selList\.filter\(function \(x\) \{ return x\.id === cardMark\.id \}\)\.length > 0\)/.test(flat),
+    'mcard row')
+  ok('【确认变动】 goes through the host instead of the card writing the record',
+    /host\.call\('confirmSelection', \{ sessionId: sidRef\.current, id: m\.id \}\)/.test(flat), 'RPC call')
+  ok('【恢复原文】 writes the note through the ordinary save path (a conflict is still caught)',
+    /const next = staleRestoreText\(String\(textRef\.current \|\| ''\), m\)/.test(flat) &&
+    /host\.call\('saveText', \{ text: next, baseRevision: revRef\.current, sessionId: sidRef\.current \}\)/.test(flat) &&
+    /if \(r && r\.conflict\) \{ notify\('笔记已被外部改动，本次未写入；请先\[重载\]再试'\); return \}/.test(flat), 'restore')
+  ok('the badge is only a button where the actions can work (a cross-note row keeps it plain)',
+    /m\.stale \? \(cross \|\| listName/.test(flat), 'cross note')
 }
 
 console.log('the note-menu expansion is per session too (it leaked across a session switch)')

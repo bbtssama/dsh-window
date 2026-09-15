@@ -9,6 +9,7 @@
  * Run: node src/verify-reanchor.mjs
  */
 import path from 'node:path'
+import fsSync from 'node:fs'
 
 const lib = path.join('D:\\DSH\\profiles\\web\\node_modules\\dsh-window\\lib')
 // remapSelections is not exported; mount the host half and drive it through the RPC
@@ -211,6 +212,120 @@ ok('a tail selection is not left covering the appended line',
   JSON.stringify(gone['sel-tail'] && { end: gone['sel-tail'].endLine, stale: gone['sel-tail'].stale }))
 ok('the whole-document cover grows to include the appended line',
   gone['sel-all'] && gone['sel-all'].endLine >= 41, JSON.stringify(gone['sel-all'] && [gone['sel-all'].startLine, gone['sel-all'].endLine, gone['sel-all'].stale]))
+
+// ── the two functions the warning badge offers ────────────────────────────────────────────────
+// Reported need: a mark whose text was edited under it says 「原文已变动」, and the reader wants to
+// decide what happens next — put the text BACK (an edit of the note), or ACCEPT the new text (a
+// change of the mark's memory, no note edit). Both live behind the badge.
+console.log('the two functions on a 「原文已变动」 mark (恢复原文 / 确认变动)')
+
+const M1 = '甲 保留的一段'
+const M2 = '乙 会被删掉的一段'
+const M3 = '丙 也会删掉的一段'
+const M4 = '丁 结尾'
+const M5 = '   '
+const staleBase = [M1, M2, M3, M4, M5].join('\n') + '\n'
+const E1 = '甲 保留的一段'
+const E2 = '乙 已经改过的一段的内容'
+const E3 = '丙 已经换掉这里的内容'
+const staleEdited = [E1, E2, E3, M4, M5].join('\n') + '\n'
+files.set(NOTE, staleBase)
+files.set(STATE, JSON.stringify({
+  v: 1, seq: 3,
+  selections: [
+    { id: 'sel-gone', seq: 1, startLine: 2, startCol: 2, endLine: 2, endCol: 9, text: '会被删掉的一段', createdAt: 'x', color: 'yellow' },
+    { id: 'sel-gone2', seq: 2, startLine: 3, startCol: 2, endLine: 3, endCol: 9, text: '也会删掉的一段', createdAt: 'x', color: 'green' },
+    { id: 'sel-blank', seq: 3, startLine: 5, startCol: 0, endLine: 5, endCol: 3, text: '   ', createdAt: 'x', color: 'pink' },
+  ],
+}) + '\n')
+
+const host4 = await import(new URL('file:///' + path.join(lib, 'index.js').replace(/\\/g, '/')).href + '?v=4')
+routeHandler = null
+tools.clear()
+host4.apply(ctx, {})
+for (const fn of lateWiring.slice(3)) fn()
+await tools.get('note_read').execute({}, { agent: { session: { header: { id: SID, cwd: ROOT } } } })
+const st6 = await rpc('state', { revision: -1, sessionId: SID })
+ok('the stale fixture loaded with its three marks', st6.result.selections.length === 3, String(st6.result.selections.length))
+
+// Edit the two marked lines so their remembered text is gone: both marks go stale.
+const saveStale = await rpc('saveText', { text: staleEdited, baseRevision: st6.result.revision, sessionId: SID })
+ok('the edit that orphans those two marks was accepted', saveStale.result && saveStale.result.ok === true, JSON.stringify(saveStale.result && saveStale.result.error))
+const st7 = await rpc('state', { revision: -1, sessionId: SID })
+const st7by = {}
+for (const s of st7.result.selections) st7by[s.id] = s
+ok('a mark whose text was overwritten reports stale',
+  st7by['sel-gone'] && st7by['sel-gone'].stale === true, JSON.stringify(st7by['sel-gone'] && st7by['sel-gone'].stale))
+ok('and its neighbour does too, while the untouched whitespace mark does not',
+  st7by['sel-gone2'] && st7by['sel-gone2'].stale === true && st7by['sel-blank'] && st7by['sel-blank'].stale === false,
+  JSON.stringify({ g2: st7by['sel-gone2'] && st7by['sel-gone2'].stale, blank: st7by['sel-blank'] && st7by['sel-blank'].stale }))
+
+// ── 确认变动 ──
+const confirmed = await rpc('confirmSelection', { id: 'sel-gone', sessionId: SID })
+ok('【确认变动】 is answered by the host', confirmed.result && confirmed.result.ok === true, JSON.stringify(confirmed.result && confirmed.result.error))
+const afterConfirm = {}
+for (const s of (confirmed.result && confirmed.result.selections) || []) afterConfirm[s.id] = s
+const expectSlice = E2.slice(2, 9)
+ok('it clears stale and makes the text under the mark the new remembered text',
+  afterConfirm['sel-gone'] && afterConfirm['sel-gone'].stale === false && afterConfirm['sel-gone'].text === expectSlice,
+  JSON.stringify(afterConfirm['sel-gone'] && { stale: afterConfirm['sel-gone'].stale, text: afterConfirm['sel-gone'].text, want: expectSlice }))
+ok('it does NOT touch the note itself',
+  files.get(NOTE) === staleEdited, JSON.stringify(String(files.get(NOTE)).slice(0, 24)))
+const st8 = await rpc('state', { revision: -1, sessionId: SID })
+ok('the confirmation survives a reload',
+  st8.result.selections.filter((s) => s.id === 'sel-gone')[0].stale === false, 'from disk')
+
+// ── 恢复原文 (the text the card would write, exercised through the real save) ──
+const src = fsSync.readFileSync(new URL('./dynamic-client.js', import.meta.url), 'utf8')
+const pureStart = src.indexOf('/* STALE-PURE-START */')
+const pureEnd = src.indexOf('/* STALE-PURE-END */')
+let splice = null
+try {
+  splice = new Function(src.slice(pureStart + '/* STALE-PURE-START */'.length, pureEnd) + '\nreturn staleRestoreText')()
+} catch (err) { }
+ok('the 恢复原文 text builder is extractable from the client source',
+  typeof splice === 'function', String(pureStart) + ',' + String(pureEnd))
+if (splice) {
+  const mark2 = st7by['sel-gone2']
+  const restored = splice(staleEdited, mark2)
+  // The span the mark covers is replaced, the rest of that line is left alone — which is what the
+  // orange band shows: cols 2..9 are the mark, `内容` beyond them is not.
+  const restoredLine3 = '丙 也会删掉的一段内容'
+  ok('it splices the remembered text back at the range the mark now has',
+    typeof restored === 'string' && restored.split('\n')[2] === restoredLine3,
+    JSON.stringify(restored && restored.split('\n').slice(1, 3)))
+  ok('and the rest of the note is untouched',
+    restored && restored.split('\n')[0] === E1 && restored.split('\n')[3] === M4, 'lines 1 and 4')
+  ok('nothing to do when that range already holds the remembered text',
+    splice(staleEdited, { startLine: 1, startCol: 0, endLine: 1, endCol: 1, text: '甲' }) === null, 'no-op')
+  ok('a mark with no remembered text is refused instead of writing an empty string',
+    splice(staleEdited, { startLine: 1, startCol: 0, endLine: 1, endCol: 1, text: '' }) === null, 'empty')
+  const clamped = splice(staleEdited, { startLine: 999, startCol: 999, endLine: 999, endCol: 999, text: 'X' })
+  ok('out-of-range coordinates are clamped rather than throwing',
+    typeof clamped === 'string' && clamped.indexOf(staleEdited) === 0 && clamped.endsWith('X'),
+    JSON.stringify(clamped && clamped.slice(-8)))
+  // The end the reader actually gets: the client saves that text, and the host re-anchors on save,
+  // which is what makes the mark stop being stale — no second mechanism involved.
+  const back = await rpc('saveText', { text: restored, baseRevision: (await rpc('state', { revision: -1, sessionId: SID })).result.revision, sessionId: SID })
+  ok('saving it back is accepted', back.result && back.result.ok === true, JSON.stringify(back.result && back.result.error))
+  const st9 = await rpc('state', { revision: -1, sessionId: SID })
+  const back2 = st9.result.selections.filter((s) => s.id === 'sel-gone2')[0]
+  ok('bringing the text back clears stale by itself (the host re-anchors on every save)',
+    back2 && back2.stale === false, JSON.stringify(back2 && back2.stale))
+  ok('and the mark remembers the text that is really there again',
+    back2 && back2.text === '也会删掉的一段', JSON.stringify(back2 && back2.text))
+  ok('the note on disk carries the original phrase again',
+    String(files.get(NOTE)).split('\n')[2] === restoredLine3, JSON.stringify(String(files.get(NOTE)).split('\n')[2]))
+}
+
+// ── 确认变动 refuses what it cannot do honestly ──
+const blank = await rpc('confirmSelection', { id: 'sel-blank', sessionId: SID })
+ok('confirming a mark that now covers only whitespace fails with a reason',
+  blank.result && blank.result.ok === false && /空白/.test(String(blank.result.error)), JSON.stringify(blank.result && blank.result.error))
+const missingConfirm = await rpc('confirmSelection', { id: 'sel-does-not-exist', sessionId: SID })
+ok('confirming an unknown mark answers found:false instead of pretending',
+  missingConfirm.result && missingConfirm.result.ok === false && missingConfirm.result.found === false,
+  JSON.stringify(missingConfirm.result && { ok: missingConfirm.result.ok, found: missingConfirm.result.found }))
 
 console.log(failed === 0 ? '\nALL RE-ANCHOR CHECKS PASSED' : '\n' + failed + ' CHECK(S) FAILED')
 process.exit(failed === 0 ? 0 : 1)
