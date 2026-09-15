@@ -820,3 +820,61 @@ verify-durability` 全绿。
 
 **本阶段新增断言**：`verify-notes.mjs` 323 条（+12：归属/取用/redeliver/忽略规则/迁移/`gitReady`），
 四个套件（selftest / verify-notes / verify-reanchor / verify-durability）全绿。
+
+## Phase 5 · 命名收敛 + 工具合并（已完成，`377dc0f`）
+
+**改名（一个概念一个名字，评审 §P1-9 表逐条落地）**
+
+| 旧名 | 新名 |
+|---|---|
+| `note_get_selections` | `note_mark_list` |
+| `note_take_new_selections` | `note_mark_new` |
+| `note_add_selection` / `note_remove_selection` / `note_clear_selections` | `note_mark_add` / `note_mark_remove` / `note_mark_clear` |
+| `note_set_color` / `note_set_style` / `note_set_remark` | `note_mark_color` / `note_mark_style` / `note_mark_remark` |
+| `note_lists`（与 `note_list` 只差一个 s） | `note_mark_lists` |
+| `note_ui` / `note_panel` / `note_goto` | `note_card_ui` / `note_card_panel` / `note_scroll_to` |
+| `note_clear` / `note_delete`（危险等级不同而名字没体现） | `note_clear_keep_history` / `note_delete_forever` |
+| `note_import_folder` | `note_folder_import` |
+| `note_import`（一名两物） | `note_append` / `note_replace` |
+
+**合并（不多花一份 description）**
+
+- `note_patch_many` → **`note_patch({edits:[…]})`**：同一个操作，内部仍从后往前应用；
+- `note_checkpoint` → **`note_commit({reason})`**：同一个操作，reason 写进提交信息。
+
+**工具数 33 → 32**（合并 −2、拆名 +1）：每轮常驻的工具面少了一份 description。
+
+**对评审的一处有意偏离（如实记录）**：§P1-9 的迁移策略要求"先加别名指向同一实现，两个 minor 后再删"。
+本仓库**没有**加别名窗口：别名 = 每个旧名都多一份工具 description 常驻每一轮上下文，与 §P2-10
+"工具面收窄"的目标直接冲突（18 个别名会把工具数顶回 50）。替代做法是把改名与合并**一次性**做完，
+并把新名字写进提示词（`note_status → note_read(mode:"auto") → note_diff → 确实需要才 full` 的五条铁律），
+同时 README 明写这次改名 —— 习惯靠文档与提示词迁移，不靠并存的旧名。
+
+**验收**：`verify-notes.mjs` **324 条**断言全过；`selftest`（32 工具 + 提示词节）/`verify-reanchor`/
+`verify-durability` 全绿；构建闸门 `hostToolHits = 32`；真实浏览器（`http://localhost:3080`）里卡片正常渲染
+本会话 160 份笔记的大笔记、控制台 0 error。
+
+> ⚠️ **本次改动包含 host 半，必须重启 dsh 才会加载新的工具面**（客户端半只有注释变化，刷新即可）。
+> 重启前，正在运行的会话仍调用旧工具名（旧 bundle 仍在内存里，不会报错）。
+
+## 全部阶段完成情况
+
+| 阶段 | 状态 | 提交 |
+|---|---|---|
+| Phase 0 · 成本度量（§7.3/§7.4） | ✅ | `787f397` |
+| Phase 1 · P0-1 砍回显 + P0-3 提示词铁律 | ✅ | `787f397` |
+| Phase 2 · P0-2 增量协议 | ✅ | `fd978e7` |
+| Phase 3 · P0-4 标记归属 + P1-6 提交 delta | ✅ | `76911cc` |
+| Phase 4 · P1-5 状态出 git + P1-7 note_create 建仓 | ✅ | `76911cc` |
+| Phase 5 · P1-9 命名收敛 + 合并 | ✅ | `377dc0f` |
+
+**没有做完的部分（评审里提到、本次未实现，原因如实写在这里）**
+
+1. **§6.1 状态改成 append-only JSONL / 独立状态仓**：这是"写放大与 diff 噪音"的根治方案，但会同时改动
+   `.note-state.json` 的读取方（卡片轮询、列表、增量基线、标记再锚定、durability 套件）—— 属于**下一个大版本**的
+   数据格式迁移，硬塞进本次会在"改行为"的同时换持久化格式，风险与收益不成比例。本次只做到"状态文件不进 git"（P1-5）。
+2. **§6.3 把 emit 推到 agent（推送而非轮询）**：插件已用每轮提示词变量把路铺好（`dsh_window_note_scope`），
+   但变量 provider 是**同步**接口、拿不到快照，所以只能注入缓存摘要。真正的事件推送需要宿主侧提供异步变量/注入能力，
+   不是本插件单独能实现的。
+3. **工具数 ≤18（§P2-10）**：本次从 33 降到 32。继续砍到 18 意味着合并 `note_read/write/patch/find` 这类
+   **语义不同**的工具，会把"选错工具"的风险换成"参数记错"的风险 —— 需要新一轮设计评审，不宜顺手做。
