@@ -36,6 +36,22 @@ const CSS = [
 '.dn-mki.dn-mku{font-style:italic;text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:2px;}',
 '.dn-blk-editor{width:100%;box-sizing:border-box;border:1px dashed rgba(0,0,0,.3);border-radius:8px;padding:8px 10px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.6;background:rgba(255,214,0,.08);color:inherit;outline:none;resize:vertical;overflow:auto;}',
 '.dn-blk-editor:focus{border-color:var(--dsw-alias-label-primary,#1b1b1b);}',
+// In-place editing (Typora-style). The mirror layer keeps the rendered look and the textarea is
+// stacked exactly on top of it with transparent glyphs, so the caret follows text that is painted
+// by the mirror. Every metric that decides where a glyph lands must therefore be shared: font,
+// size, line-height, padding, border width and `white-space` are set once for both layers, and the
+// textarea gets a transparent 1px border so its content box starts where the mirror's does.
+'.dn-inl{position:relative;}',
+'.dn-inl-code{margin:8px 0;display:flow-root;}',
+'.dn-inl-code .dn-inl-mirror{margin:0;overflow:hidden;}',
+'.dn-inl-mirror{pointer-events:none;}',
+'.dn-inl-mirror-text{margin:0;white-space:pre-wrap;overflow-wrap:break-word;overflow:hidden;}',
+'.dn-inl-row{white-space:pre-wrap;overflow-wrap:break-word;}',
+'.dn-inl-ta{position:absolute;top:0;left:0;width:100%;height:100%;margin:0;padding:0;border:1px solid transparent;box-sizing:border-box;background:transparent;color:transparent;caret-color:var(--dsw-alias-label-primary,#1b1b1b);resize:none;overflow:auto;outline:none;font:inherit;line-height:inherit;letter-spacing:inherit;white-space:pre-wrap;overflow-wrap:break-word;}',
+'.dn-inl-ta-code{padding:8px 10px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.6;white-space:pre;overflow-wrap:normal;tab-size:4;}',
+'.dn-inl-ta::selection{background:rgba(79,124,255,.28);}',
+'.dn-inl:focus-within .dn-inl-mirror{background:rgba(79,124,255,.05);}',
+'.dn-inl-text:focus-within .dn-inl-mirror{background:rgba(79,124,255,.05);border-radius:4px;box-shadow:0 0 0 1px rgba(79,124,255,.25);}',
 // Handle: 44x44 invisible hit area, visual drawn inside as dot + stem (tip on the
 // caret). Overrides the old 12px circle rule regardless of source order.
 '.dn-root .dn-lay .dn-handle{position:absolute;width:44px;height:44px;margin:0;padding:0;background:none;border:0;border-radius:0;box-shadow:none;transform:none;cursor:grab;}',
@@ -870,6 +886,56 @@ function toggleTaskText(text, lineNo) {
   return copy.join(String.fromCharCode(10))
 }
 /* TASK-PURE-END */
+/* INLINE-PURE-START */
+// In-place editing helpers (Typora-style). They are pure and tokenizer-injected on purpose: the
+// mirror layer below the (transparent) textarea has to be built with exactly the same characters as
+// the textarea holds, so the two can never drift — which is why the escaping lives here and is
+// asserted standalone in the suite rather than being buried in the component.
+function escHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+/**
+ * One line of a code block, highlighted, as HTML for the mirror layer.
+ *
+ * The tokenizer is injected (`tokenize(line, lang)` returns `[{t, cls}]`) so this stays a pure
+ * function; the card passes the real `hlTokens`. A space-only run stays a space: an empty span
+ * would collapse and the caret would drift away from the glyphs above it.
+ */
+function codeLineHtml(line, lang, tokenize) {
+  const src = String(line)
+  const toks = typeof tokenize === 'function' ? (tokenize(src, lang) || []) : [{ t: src, cls: '' }]
+  let out = ''
+  for (let i = 0; i < toks.length; i++) {
+    const t = toks[i]
+    const text = t && typeof t.t === 'string' ? t.t : ''
+    if (text === '') continue
+    // `data-soff` is the character offset this span starts at, which is how the marked-passage
+    // overlay finds the box of a mark on a line: without it a mark inside the block being edited
+    // would lose its colour until the editor closed. It is only meaningful for code, where the
+    // mirror shows the line exactly as the source has it.
+    const off = typeof t.off === 'number' ? ' data-soff="' + t.off + '"' : ''
+    out += '<span class="' + (t.cls ? 'dn-i ' + t.cls : 'dn-i') + '"' + off + '>' + escHtml(text) + '</span>'
+  }
+  if (out === '') return src === '' ? '\u00a0' : '<span class="dn-i">' + escHtml(src) + '</span>'
+  return out
+}
+/**
+ * One line of a TEXT block (paragraph / heading / list item / quote) for the mirror layer.
+ *
+ * Deliberately the raw Markdown, escaped: Typora shows the source of the element you are editing,
+ * and showing the raw characters is also the only way the mirror and the textarea can be guaranteed
+ * to have identical metrics (a "pretty" inline rendering would drop the `**` and shift every glyph
+ * under the caret).
+ */
+function textLineHtml(raw) {
+  const s = String(raw)
+  return s === '' ? '\u00a0' : escHtml(s)
+}
+/** The line list of a buffer, without allocating when it is a single line. */
+function inlineLinesOf(text) {
+  return String(text).split('\n')
+}
+/* INLINE-PURE-END */
 function parseBlocks(text) {
   const ls = String(text).split('\n')
   const blocks = []
@@ -919,6 +985,164 @@ function parseBlocks(text) {
     i++
   }
   return blocks
+}
+/**
+ * In-place block editor (Typora-style), used for code blocks and for text blocks.
+ *
+ * How it works: the block keeps its RENDERED look — the "mirror" layer — and a textarea with
+ * TRANSPARENT text sits exactly on top of it. The caret and the selection live in the textarea, the
+ * glyphs come from the mirror. That buys three things a plain source box cannot:
+ *   - a code block keeps its syntax highlighting while you type in it,
+ *   - the block does not move or change size when you enter edit mode,
+ *   - the marked-passage overlay (measured from these same line elements) keeps lining up, because
+ *     the mirror carries the same `data-line` hooks the read-mode rendering does.
+ *
+ * Performance rule: React never re-renders per keystroke. The buffer lives in a ref and each
+ * keystroke only re-fills the lines whose text actually changed; a full rebuild happens only when
+ * the line count changes (pressing Enter). The mirror's children are built imperatively, so React
+ * (which re-renders the card on every poll) never touches them.
+ */
+function InlineEditor(props) {
+  const mirrorRef = React.useRef(null)
+  const taRef = React.useRef(null)
+  const lastRef = React.useRef(String(props.value === undefined || props.value === null ? '' : props.value))
+  const rowsRef = React.useRef([])
+  const bumpTimerRef = React.useRef(0)
+  const propsRef = React.useRef(props)
+  propsRef.current = props
+  const isCode = props.variant === 'code'
+  // The first SOURCE line the buffer covers. For a code block that is the line after the fence, and
+  // the mirror has to number its rows from there or the marked-passage overlay would measure the
+  // wrong line while the block is being edited.
+  const baseLine = props.firstLine || (props.block && props.block.line ? props.block.line : 1)
+  function bump() { const p = propsRef.current; if (p && p.bumpGeometry) { try { p.bumpGeometry() } catch (err) { } } }
+  // Re-measuring the whole card on every keystroke is what made typing into a long block feel
+  // heavy: the marked-passage overlay walks every line of the note. The geometry only has to catch
+  // up with the block once the keystrokes pause, so it is coalesced into one deferred bump.
+  function bumpSoon() {
+    const p = propsRef.current
+    if (!p || !p.bumpGeometry) return
+    if (bumpTimerRef.current) return
+    bumpTimerRef.current = window.setTimeout(function () { bumpTimerRef.current = 0; bump() }, 180)
+  }
+  function register(ln, el) { const p = propsRef.current; if (p && p.registerLine) { try { p.registerLine(ln, el) } catch (err) { } } }
+  function lineHtml(text) {
+    const p = propsRef.current
+    return isCode ? codeLineHtml(text, (p && p.lang) || '', p && p.tokenize) : textLineHtml(text)
+  }
+  function makeRow(text, i) {
+    const ln = baseLine + i
+    const div = document.createElement('div')
+    div.className = isCode ? 'dn-code-line' : 'dn-inl-row'
+    div.setAttribute('data-line', String(ln))
+    div.innerHTML = lineHtml(text)
+    div.__html = div.innerHTML
+    register(ln, div)
+    return div
+  }
+  function fillAll() {
+    const m = mirrorRef.current
+    if (!m) return
+    const lines = inlineLinesOf(lastRef.current)
+    const frag = document.createDocumentFragment()
+    for (let i = 0; i < lines.length; i++) frag.appendChild(makeRow(lines[i], i))
+    if (frag.childNodes.length === 0) frag.appendChild(makeRow('', 0))
+    m.textContent = ''
+    m.appendChild(frag)
+    const kids = []
+    for (let i = 0; i < m.childNodes.length; i++) kids.push(m.childNodes[i])
+    rowsRef.current = kids
+    syncScroll()
+    bump()
+  }  function syncLines() {
+    const m = mirrorRef.current
+    if (!m) return
+    const lines = inlineLinesOf(lastRef.current)
+    if (lines.length !== rowsRef.current.length) { fillAll(); return }
+    for (let i = 0; i < lines.length; i++) {
+      const el = rowsRef.current[i]
+      const html = lineHtml(lines[i])
+      if (el.__html !== html) { el.innerHTML = html; el.__html = html }
+    }
+    bumpSoon()
+  }
+  function syncScroll() {
+    const ta = taRef.current
+    const m = mirrorRef.current
+    if (!ta || !m) return
+    m.scrollTop = ta.scrollTop
+    m.scrollLeft = ta.scrollLeft
+  }
+  function pushBuffer(text) {
+    const p = propsRef.current
+    if (p && p.onBuffer) { try { p.onBuffer(text) } catch (err) { } }
+  }
+  function onInput(ev) {
+    lastRef.current = ev.target.value
+    pushBuffer(lastRef.current)
+    syncLines()
+  }
+  function onKeyDown(ev) {
+    const p = propsRef.current
+    if (ev.key === 'Escape') { ev.preventDefault(); if (p && p.onCancel) p.onCancel(); return }
+    if (ev.key === 'Enter' && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); if (p && p.onCommit) p.onCommit(); return }
+    // Tab indents inside code instead of throwing focus away — the one place where a tab is content
+    // rather than navigation.
+    if (ev.key === 'Tab' && isCode) {
+      ev.preventDefault()
+      const ta = ev.target
+      const s = ta.selectionStart, e = ta.selectionEnd
+      const v = String(ta.value)
+      ta.value = v.slice(0, s) + '  ' + v.slice(e)
+      try { ta.setSelectionRange(s + 2, s + 2) } catch (err) { }
+      lastRef.current = ta.value
+      pushBuffer(ta.value)
+      syncLines()
+    }
+  }
+  function stop(ev) { ev.stopPropagation() }
+  React.useEffect(function () {
+    fillAll()
+    const ta = taRef.current
+    if (ta) {
+      try {
+        ta.focus({ preventScroll: true })
+        const off = propsRef.current.caretOffset
+        if (typeof off === 'number' && off >= 0) ta.setSelectionRange(off, off)
+        else ta.setSelectionRange(ta.value.length, ta.value.length)
+      } catch (err) { }
+    }
+    bump()
+    return function () { rowsRef.current = [] }
+    // One mount per edit session: the parent keys this component by the block it edits.
+  }, [])
+  const mirror = isCode
+    ? React.createElement('pre', { className: 'dn-pre dn-inl-mirror', ref: mirrorRef, 'data-line': String(baseLine) })
+    : React.createElement('div', { className: 'dn-inl-mirror dn-inl-mirror-text', ref: mirrorRef })
+  const ta = React.createElement('textarea', {
+    ref: taRef,
+    className: 'dn-inl-ta' + (isCode ? ' dn-inl-ta-code' : ''),
+    defaultValue: lastRef.current,
+    spellCheck: false,
+    autoCapitalize: 'off',
+    autoCorrect: 'off',
+    wrap: isCode ? 'off' : 'soft',
+    onInput: onInput,
+    onScroll: syncScroll,
+    onKeyDown: onKeyDown,
+    onPointerDown: stop,
+    onPointerUp: stop,
+    onDoubleClick: stop,
+    onClick: stop,
+  })
+  // A list item keeps its bullet next to the editable body; every other text block IS the body, so
+  // the wrapper carries the block's own class and both the mirror and the textarea inherit its font.
+  if (isCode) return React.createElement('div', { className: 'dn-inl dn-inl-code' }, [mirror, ta])
+  if (props.leading) {
+    return React.createElement('div', { className: props.wrapClass || 'dn-inl' }, [props.leading,
+      React.createElement('div', { className: 'dn-li-body dn-inl dn-inl-text' }, [mirror, ta])])
+  }
+  return React.createElement('div', { className: (props.wrapClass || '') + ' dn-inl dn-inl-text' }, [mirror, ta])
 }
 function IconPanelLeft() {
   return React.createElement('svg', { width: 16, height: 16, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': 'true' }, [
@@ -2147,10 +2371,22 @@ return {
       // Focus the block editor and drop the caret where the double click landed.
       React.useEffect(function () {
         if (editBlock === null) return undefined
+        // An in-place editor does not register itself in blockEditorRef (it is a React component, not
+        // the old single textarea), so both "is the pointer inside the editor?" and "what should the
+        // shell's focus grab focus?" have to fall back to the DOM. Without this the outside-click
+        // commit never fired for in-place edits and a click on another block silently threw the
+        // buffer away.
+        const inlineBox = function () {
+          const card = rootRef.current
+          return card ? card.querySelector('.dn-inl') : null
+        }
         const grab = function () {
-          const ta = blockEditorRef.current
+          const ta = blockEditorRef.current || (inlineBox() ? inlineBox().querySelector('.dn-inl-ta') : null)
           const eb = editBlockRef.current
           if (!ta || !eb) return
+          // The in-place editor places its own caret from the click point; re-grabbing focus is only
+          // about the shell stealing it back.
+          if (blockEditorRef.current === null) { try { ta.focus({ preventScroll: true }) } catch (err) { } return }
           try {
             ta.focus()
             if (eb.caret) {
@@ -2170,9 +2406,13 @@ return {
         document.addEventListener('keydown', onKey, true)
         const onDown = function (ev) {
           const ta = blockEditorRef.current
-          if (!ta) return
           const node = ev.target
-          if (node === ta || (node && ta.contains && ta.contains(node))) return
+          // An in-place editor owns its own textarea: a pointerdown inside its box (on the
+          // highlighting, on the padding, on the caret) is NOT an "outside click".
+          if (node && node.closest && node.closest('.dn-inl')) return
+          if (ta) {
+            if (node === ta || (node && ta.contains && ta.contains(node))) return
+          } else if (!inlineBox()) return
           if (node && node.closest && node.closest('.dn-bar, .dn-handle')) return
           commitBlockEdit()
         }
@@ -3741,11 +3981,22 @@ return {
           let to = b.line
           if (b.k === 'code') to = b.endLine ? b.endLine : (b.line + (b.body ? b.body.length : 0) + 1)
           if (b.k === 'table' && b.rows && b.rows.length) to = b.rows[b.rows.length - 1].line
-          if (line >= b.line && line <= to) return { from: b.line, to: to, kind: b.k }
+          if (line >= b.line && line <= to) return { from: b.line, to: to, kind: b.k, block: b }
         }
         return null
       }
       function cancelBlockEdit() { editBlockRef.current = null; setEditBlock(null) }
+      /**
+       * The in-place editor's buffer. Deliberately NOT a setState: the mirror layer is updated
+       * imperatively by the editor itself, and a React render per keystroke would rebuild the whole
+       * card's block list while the user is typing. commitBlockEdit reads this ref, and the card's
+       * next poll re-renders the editor from whatever the ref holds, so nothing is lost.
+       */
+      function bufferInlineEdit(value) {
+        const eb = editBlockRef.current
+        if (!eb) return
+        editBlockRef.current = Object.assign({}, eb, { value: value })
+      }
       function commitBlockEdit() {
         const eb = editBlockRef.current
         editBlockRef.current = null
@@ -3795,7 +4046,15 @@ return {
           return
         }
         const m = markAtEvent(e)
-        if (!m) { setMcard(null); return }
+        if (!m) {
+          setMcard(null)
+          // Typora-style: a plain click inside the text starts editing that block, right where you
+          // clicked. Nothing that already had a meaning loses it — a click ON a mark still raises the
+          // mark's function card (above), and buttons, links, checkboxes, tables and pictures were
+          // filtered out before this point.
+          startInlineEdit(pointToPos(e.clientX, e.clientY))
+          return
+        }
         // Tapping the same mark again closes its card (one click does one thing).
         if (mcard && mcard.id === m.id) { setMcard(null); return }
         const x = e.clientX
@@ -3841,17 +4100,59 @@ return {
           } else notify('跟不了这个链接：' + ((r && r.error) || '未知原因'))
         }).catch(function (err) { notify('跟不了这个链接: ' + ((err && err.message) || String(err))) })
       }
+      /**
+       * Enter in-place editing for the block under `pt`, with the caret where the click landed.
+       *
+       * This is the Typora gesture: click a line and you are editing it. Only the blocks that are a
+       * text run take part — a table is a grid and a mermaid block is a picture of its source, so
+       * both keep the source box (double click), exactly as before.
+       */
+      function startInlineEdit(pt) {
+        if (mode !== 'read' || !pt) return false
+        const range = blockRangeAt(pt.line)
+        if (!range) return false
+        const k = range.kind
+        if (!(k === 'p' || k === 'h' || k === 'li' || k === 'quote' || k === 'code')) return false
+        let from = range.from
+        let to = range.to
+        // A code block is edited WITHOUT its fences, exactly like Typora: the ``` lines stay where
+        // they are (you cannot delete them by accident) and the buffer holds the code alone.
+        // `block.endLine` IS the last body line (the closing fence sits on the next one), so the
+        // buffer runs from the line after the fence through it. A block with no body keeps the whole
+        // range, so its fences stay editable.
+        if (k === 'code' && range.block && typeof range.block.endLine === 'number' && range.block.endLine >= range.block.line + 1) {
+          from = range.block.line + 1
+          to = range.block.endLine
+        }
+        const lines = String(textRef.current || '').split(String.fromCharCode(10))
+        if (from < 1 || to > lines.length || to < from) return false
+        const eb = {
+          from: from, to: to, kind: k,
+          // Which BLOCK this edit belongs to. For a code block the buffer starts one line lower (the
+          // body, not the fence), so the renderer cannot match on `from` alone — it did, and the
+          // result was a click that quietly did nothing.
+          matchLine: range.from,
+          value: lines.slice(from - 1, to).join(String.fromCharCode(10)),
+          caret: pt, openedAt: Date.now(),
+        }
+        editBlockRef.current = eb
+        setEditBlock(eb)
+        return true
+      }
       function onDoubleClick(e) {
         if (mode !== 'read') return
         const tgt = e.target
         if (tgt && tgt.closest) { const a = tgt.closest('a'); if (a && a.getAttribute('href') && a.getAttribute('href') !== '#') return }
         const pt = pointToPos(e.clientX, e.clientY)
         if (!pt) { enterEdit(null); return }
+        // The same in-place gesture as a single click (a code block edits its body, without the
+        // fences). A table, a mermaid block or an image keeps the source box it always had.
+        if (startInlineEdit(pt)) return
         const range = blockRangeAt(pt.line)
         if (!range) { enterEdit(pt); return }
         // A table cell edits its own row, with the caret landing in that cell.
         const lines = String(st.text).split(String.fromCharCode(10))
-        const eb = { from: range.from, to: range.to, kind: range.kind, value: lines.slice(range.from - 1, range.to).join(String.fromCharCode(10)), caret: pt, openedAt: Date.now() }
+        const eb = { from: range.from, to: range.to, kind: range.kind, matchLine: range.from, value: lines.slice(range.from - 1, range.to).join(String.fromCharCode(10)), caret: pt, openedAt: Date.now() }
         editBlockRef.current = eb
         setEditBlock(eb)
       }
@@ -4076,7 +4377,37 @@ return {
         for (let bi = 0; bi < blocks.length; bi++) {
           const b = blocks[bi]
           const key = 'b' + bi
-          if (editBlock && b.line === editBlock.from) {
+          if (editBlock && b.line === (editBlock.matchLine || editBlock.from)) {
+            // In-place editing: code blocks and text blocks keep their rendered look (the mirror
+            // layer) with a transparent textarea on top. A table is a grid rather than a text run
+            // and a mermaid block is a picture of its source, so those keep the plain source box.
+            const inPlace = b.k === 'code' ? (String(b.lang || '').toLowerCase() !== 'mermaid') : (b.k === 'p' || b.k === 'h' || b.k === 'li' || b.k === 'quote')
+            if (inPlace) {
+              const caretOff = editBlock.caret
+                ? Math.max(0, offsetOfPos(editBlock.value, Math.max(1, editBlock.caret.line - editBlock.from + 1), Math.max(0, (editBlock.caret.col || 0) - (b.base || 0))))
+                : -1
+              const shared = {
+                key: key, block: b, value: editBlock.value, caretOffset: caretOff, firstLine: editBlock.from,
+                variant: b.k === 'code' ? 'code' : 'text',
+                lang: b.k === 'code' ? String(b.lang || '').toLowerCase() : '',
+                tokenize: hlTokens,
+                registerLine: function (ln, el) { if (el) lineEls.current[ln] = el },
+                bumpGeometry: function () { bumpGeometry() },
+                onBuffer: bufferInlineEdit,
+                onCommit: commitBlockEdit,
+                onCancel: cancelBlockEdit,
+              }
+              if (b.k === 'code') out.push(h(InlineEditor, shared))
+              else if (b.k === 'li') {
+                out.push(h(InlineEditor, Object.assign({}, shared, {
+                  wrapClass: 'dn-li',
+                  leading: h('span', { className: 'dn-bullet', key: 'm' }, b.task ? (b.checked ? '\u2611' : '\u2610') : (b.ordered ? b.marker : '\u2022')),
+                })))
+              } else if (b.k === 'h') out.push(h(InlineEditor, Object.assign({}, shared, { wrapClass: 'dn-h dn-h' + b.level })))
+              else if (b.k === 'quote') out.push(h(InlineEditor, Object.assign({}, shared, { wrapClass: 'dn-quote' })))
+              else out.push(h(InlineEditor, Object.assign({}, shared, { wrapClass: 'dn-p' })))
+              continue
+            }
             out.push(h('textarea', {
               // UNCONTROLLED on purpose: the card re-renders on every poll (~0.7s), and a controlled
               // value taken from a render-time snapshot reset the textarea to that snapshot on each of

@@ -411,8 +411,7 @@ if (ReactDOMServer === null) {
 }
 
 console.log('')
-console.log('client render: marks that live in the text')
-// The italic/underline renderer is pure arithmetic over a mark list plus a rendered text span,
+console.log('client render: marks that live in the text')// The italic/underline renderer is pure arithmetic over a mark list plus a rendered text span,
 // so it is testable without a browser. This is the part that decides WHICH characters carry
 // WHICH style, and getting it wrong paints the wrong words.
 {
@@ -472,6 +471,58 @@ console.log('client render: marks that live in the text')
     ok('a span outside every run is left alone', textStyleSegments(runs.byLine[4], 5, 20) === null, 'null')
     ok('an empty span is never styled', textStyleSegments(runs.byLine[2], 3, 0) === null, 'null')
   }
+}
+
+console.log('')
+console.log('client render: in-place editing (the mirror layer under the transparent textarea)')
+// The mirror layer is what makes a code block editable WITH its colours: the textarea that receives
+// the keystrokes has transparent glyphs, and every visible character comes from this HTML. So the
+// escaping and the "one span per token, never an empty span" rule are correctness, not cosmetics —
+// an unescaped `<` or a dropped space would put the caret on a character that is not there.
+{
+  const src = fs.readFileSync(path.join(lib, 'client.js'), 'utf8')
+  const inline = /\/\* INLINE-PURE-START \*\/([\s\S]*?)\/\* INLINE-PURE-END \*\//.exec(src)
+  ok('the inline-editing helpers ship with the card', inline !== null && inline[1].indexOf('function codeLineHtml(') > 0, inline === null ? 'markers missing' : inline[1].length + ' chars')
+  let api = null
+  try {
+    api = eval('(function(){' + (inline ? inline[1] : '') + '\nreturn { escHtml: escHtml, codeLineHtml: codeLineHtml, textLineHtml: textLineHtml, inlineLinesOf: inlineLinesOf }})()')
+  } catch (err) { api = null }
+  ok('and they evaluate standalone', api !== null, api === null ? 'eval failed' : 'ok')
+  if (api !== null) {
+    const { escHtml, codeLineHtml, textLineHtml, inlineLinesOf } = api
+    ok('markup in the source is escaped, never injected',
+      escHtml('<b>&"') === '&lt;b&gt;&amp;"' && textLineHtml('a < b') === 'a &lt; b',
+      escHtml('<b>&"'))
+    const fake = (line) => [{ t: 'public', cls: 'tk-k', off: 0 }, { t: ' ', off: 6 }, { t: 'x', cls: 'tk-n', off: 7 }]
+    ok('a code line becomes one span per token, and the plain runs survive',
+      codeLineHtml('public x', 'java', fake) === '<span class="dn-i tk-k" data-soff="0">public</span><span class="dn-i" data-soff="6"> </span><span class="dn-i tk-n" data-soff="7">x</span>',
+      codeLineHtml('public x', 'java', fake))
+    ok('a tokenizer that returns nothing never loses the line',
+      codeLineHtml('a<b', 'java', () => []) === '<span class="dn-i">a&lt;b</span>' &&
+      codeLineHtml('a<b', 'text', null) === '<span class="dn-i">a&lt;b</span>',
+      codeLineHtml('a<b', 'java', () => []))
+    ok('every code span carries the source offset the mark overlay measures against',
+      codeLineHtml('public x', 'java', fake).indexOf('data-soff="7"') > 0,
+      codeLineHtml('public x', 'java', fake))
+    ok('an empty line is a non-breaking space, so the caret has something to sit on',
+      codeLineHtml('', 'java', () => []) === '\u00a0' && textLineHtml('') === '\u00a0', 'nbsp')
+    ok('the buffer is split exactly the way the textarea splits it',
+      inlineLinesOf('a\nb\n').length === 3 && inlineLinesOf('a\nb\n')[2] === '' && inlineLinesOf('one').length === 1,
+      JSON.stringify(inlineLinesOf('a\nb\n')))
+  }
+  // …and the wiring has to be there, or the helpers are dead code: the editor is used for text and
+  // code blocks, the click gesture enters it, and the caret offset is translated into the buffer.
+  ok('the in-place editor is wired into the block renderer',
+    src.indexOf('h(InlineEditor, shared)') > 0 && src.indexOf('dn-li-body dn-inl dn-inl-text') > 0 &&
+    src.indexOf('startInlineEdit(pointToPos(') > 0 && src.indexOf('function bufferInlineEdit(') > 0,
+    'InlineEditor/renderBlocks/startInlineEdit present')
+  ok('a table and a mermaid block keep the plain source box',
+    /inPlace = b\.k === 'code' \? \(String\(b\.lang \|\| ''\)\.toLowerCase\(\) !== 'mermaid'\)/.test(src),
+    'mermaid excluded from in-place editing')
+  ok('the two layers share every metric that decides where a glyph lands',
+    src.indexOf('.dn-inl-ta-code{padding:8px 10px;') > 0 && src.indexOf('border:1px solid transparent;box-sizing:border-box') > 0 &&
+    src.indexOf('.dn-inl-ta{') > 0 && src.indexOf('color:transparent;caret-color:') > 0,
+    'shared metrics present')
 }
 
 console.log('')
