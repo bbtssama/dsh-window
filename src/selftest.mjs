@@ -526,5 +526,68 @@ console.log('client render: in-place editing (the mirror layer under the transpa
 }
 
 console.log('')
+console.log('client parse: quoted fences and fences that are never closed')
+// The reported "bash 没有渲染出代码块" turned out to be the PARSER, not the renderer: a real note had a
+// two-space-indented fence inside a list item with no closing line, so that block swallowed the next
+// ```bash and its language tag and the whole passage rendered as one plain code block. The same note
+// also writes code blocks inside blockquotes (`> ```bash`), which used to be flattened into separate
+// quote lines. Both are pure parser behaviour, so both are asserted here.
+{
+  const src = fs.readFileSync(path.join(lib, 'client.js'), 'utf8')
+  const at = src.indexOf('function parseBlocks(text)')
+  let end = -1, depth = 0
+  for (let k = src.indexOf('{', at); k < src.length; k++) {
+    if (src[k] === '{') depth++
+    else if (src[k] === '}') { depth--; if (depth === 0) { end = k + 1; break } }
+  }
+  let parseBlocks = null
+  try { parseBlocks = eval('(' + src.slice(at, end) + ')') } catch (err) { parseBlocks = null }
+  ok('the block parser is present in the shipped client', typeof parseBlocks === 'function', typeof parseBlocks)
+  if (typeof parseBlocks === 'function') {
+    const quoted = parseBlocks(['> 说明：', '> ```bash', '> nmcli networking off', '> nmcli networking on', '> ```', '> 后面还有一句'].join('\n'))
+    const qCode = quoted.filter((b) => b.k === 'code')[0]
+    ok('a fenced block inside a blockquote is a code block, not a row of quotes',
+      !!qCode && qCode.quoted === true && qCode.lang === 'bash' && qCode.body.length === 2 &&
+      qCode.body[0] === 'nmcli networking off' && qCode.line === 2 && qCode.endLine === 4,
+      JSON.stringify(quoted.map((b) => b.k + (b.quoted ? '(q)' : '') + ':' + b.line)))
+    ok('and the quote resumes right after it',
+      quoted[quoted.length - 1].k === 'quote' && quoted[quoted.length - 1].line === 6,
+      JSON.stringify(quoted[quoted.length - 1]))
+    const indented = parseBlocks([
+      '- 例：',
+      '  ```',
+      '  lrwxrwxrwx 1 root root 20 link -> /root/original.txt',
+      '  ^ 文件类型',
+      '',
+      '**下一节**：',
+      '```bash',
+      'nmcli networking off',
+      '```',
+    ].join('\n'))
+    const blocks = indented.filter((b) => b.k === 'code')
+    ok('an indented fence that is never closed ends where its indentation ends',
+      blocks.length === 2 && blocks[0].line === 2 && blocks[0].endLine === 4 && blocks[0].lang === '',
+      JSON.stringify(blocks.map((b) => b.line + '..' + b.endLine + ' lang=' + JSON.stringify(b.lang))))
+    ok('so the next ```bash fence keeps its language and its highlighting',
+      blocks.length === 2 && blocks[1].lang === 'bash' && blocks[1].line === 7 && blocks[1].body[0] === 'nmcli networking off',
+      blocks.length === 2 ? JSON.stringify({ line: blocks[1].line, lang: blocks[1].lang }) : 'only ' + blocks.length + ' code block(s)')
+    ok('and the paragraph between them is still a paragraph',
+      indented.some((b) => b.k === 'p' && b.line === 6), JSON.stringify(indented.map((b) => b.k + b.line)))
+  }
+  ok('the settings card and its switch ship with the card',
+    src.indexOf('插件设置') > 0 && src.indexOf('双击才编辑') > 0 && src.indexOf('setEditGesture') > 0 &&
+    src.indexOf("readMarksPref().dblClickOnly !== false") > 0 && src.indexOf('if (!dblClickOnlyRef.current)') > 0,
+    'settings card + gesture gate present')
+  ok('a single click prefers a table cell, then the block — and only when the switch allows it',
+    src.indexOf('if (startCellEdit(e.target, null)) return') > 0 && src.indexOf('if (startCellEdit(e.target, pt)) return') > 0,
+    'cell then block')
+  ok('the render cache is invalidated by the cell editor (it was not, and the click looked dead)',
+    src.indexOf("(cellEdit ? 'c' + cellEdit.line") > 0, 'cell edit part of the cache key')
+  ok('the cell input draws its own characters (a transparent one hid everything typed)',
+    src.indexOf('.dn-cell-edit .dn-cell-mirror{visibility:hidden;}') > 0 && src.indexOf('color:inherit;caret-color:') > 0,
+    'cell input visible + mirror hidden')
+}
+
+console.log('')
 console.log(failed === 0 ? 'ALL CHECKS PASSED' : failed + ' CHECK(S) FAILED')
 process.exitCode = failed === 0 ? 0 : 1
