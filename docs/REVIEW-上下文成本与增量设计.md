@@ -689,3 +689,76 @@ const BUDGET = { default: 1536, mark: 200, read: null /* 显式 full 才放行 *
 ---
 
 *报告完。所有 file:line 均基于 `D:\dsh-window` 当前工作区（v0.0.4）；实测数据来自本会话的 31 个工具调用记录。*
+
+---
+
+# 落地进度（实现记录 · 由本次工程逐阶段追加）
+
+> 本节的每一条都是**实测**（跑过套件、看过数字），不是计划。数字来自 `src/verify-notes.mjs`
+> 的「context cost」节：它对一套标准动作（建笔记 → 30 条标记 → 收/改/删/改写/读/诊断）逐次调用每个工具，
+> 量的是**模型真正看到的那段文本**的字节数，并把结果与 `src/context-cost.json` 做棘轮比较
+> （返回体一涨就失败）。文件与代码都在 `D:\dsh-window`。
+
+## 总览
+
+| 阶段 | 内容 | 状态 | 提交 |
+|---|---|---|---|
+| Phase 0 | 返回体字节度量（BUDGET + 测试节 + 基线棘轮） | ✅ 完成 | `787f397` |
+| Phase 1（P0-1/P0-3） | 砍全量回显 + 提示词省上下文铁律 | ✅ 完成 | `787f397` |
+| Phase 2（P0-2） | `note_status`/`note_diff`/`note_read.mode` + 基线落库 | ⏳ 进行中 | — |
+| Phase 3（P0-4/P1-6/P1-8） | `author` + `note_mark_new` + commit delta + diag 补全 | ⏳ 待做 | — |
+| Phase 4（P1-5/P1-7） | `.note-state.json` 出 git + `note_create` 同步建仓 | ⏳ 待做 | — |
+| Phase 5（P1-9/P2） | 命名收敛 + 合并（工具数不增） | ⏳ 待做 | — |
+
+## Phase 0 · 度量（已完成，`787f397`）
+
+`src/verify-notes.mjs` 新增一节，`src/context-cost.json` 记录基线。**它逐字复现了本报告 §4.1 的数字**：
+
+| 工具 | 改造前实测 |
+|---|---|
+| `note_read` | **4578 B** |
+| `note_set_color` | 4446 B |
+| `note_add_selection` | 4443 B（第 30 次调用；第 1 次 4295 B） |
+| `note_set_remark` | 4416 B |
+| `note_get_selections` | 4410 B |
+| `note_patch` | 4408 B |
+| `note_take_new_selections` | 4390 B |
+
+→ 报告 §P0-1 的"单次 ≈4.6 KB"**在字节级得到确认** ✓。
+
+**一处报告本身的偏差（如实记录）**：附录 A 把 `note_export` 记为"YES 回显"，但源码里它只回
+`已导出到 <path> (N 字节)`，从不回显标记 —— 判定口径里的 `selRender` 出现在别处。**实际回显的是 10 个工具**
+（`note_read`/`note_get_selections`/`note_take_new_selections`/`note_add_selection`/`note_remove_selection`/
+`note_set_color`/`note_set_style`/`note_set_remark`/`note_patch`/`note_patch_many`）。
+
+## Phase 1 · 砍回显 + 提示词铁律（已完成，`787f397`）
+
+**改了什么**
+
+1. `selRender` 默认 **brief**：每条标记一行（序号/id/颜色/样式/行范围/状态 + **前 30 字**预览）；
+   有备注只显示 `[有备注]`，不再贴备注与原文；`detail:"full"` 才给旧形态。
+2. 十个回显工具改为**只回自己的 delta**：标记增删改回 `{ok, id|removed|found|color|style|remark, revision, marks}`；
+   `note_patch`/`note_patch_many` 只回行/字符 delta；`note_read` 默认**不附标记概览**（`detail` 控制）。
+3. 五个 schema 里 `selections: { required: true }` **删除** —— 结构上不再强制回显。
+4. `note_get_selections` 新增 `ids` 与 `detail` 两个参数（看两条不必把三十条拉回来）。
+5. 提示词节把**五条省上下文铁律**放在"工作方式"最前面，并把原 `:3562` 那句"需要笔记全文时用 note_read，
+   也可以直接用 read 工具读该文件"（反向引导）替换为相反的要求；`note_take_new_selections` 的
+   "回答前先取用户新标记"保留（它是用户信号通道，不是成本项）。
+
+**实测效果（同一套动作）**
+
+| 工具 | 前 | 后 |
+|---|---|---|
+| `note_patch` | 4408 B | **60 B** |
+| `note_read` | 4578 B | **193 B** |
+| `note_add_selection` | 4443 B | **46 B** |
+| `note_set_remark` | 4416 B | **52 B** |
+| 30 条标记 brief 列表（`note_get_selections`） | 4410 B | 2447 B（30 条 × ≈80 B，固有量级；看两条用 `ids` 可降到 ≈90 B） |
+| **同一套 39 次调用合计** | ≈130 KB（按上表逐次累加） | **6943 B** |
+
+并已加**逐工具预算断言**（§7.3）：标记写类 ≤200 B、`note_patch` ≤300 B、`note_read` ≤700 B 等；
+`verify-notes.mjs` 现在 **299 条**断言全过，`build / install / selftest / verify-reanchor /
+verify-durability` 全绿。
+
+**遵守报告自己的规矩**：本阶段**只改行为、不改名字**（报告 §P1-9 明确要求"绝不同时改行为与名字"），
+所以 `/P0-3` 的铁律文本里暂时写的仍是现名；Phase 5 改名时同步更新这一段提示词。

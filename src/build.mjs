@@ -79,7 +79,7 @@ const hostHandleHits = count(hostBody, "handleLocked('")
 // rewrite their own implementations to the permanent-plugin equivalents.
 hostBody = hostBody.replaceAll('harness.registerTool(ctx, ', 'ctx.tools.register(')
 hostBody = hostBody.replaceAll('harness.handle(', 'handle(')
-if (hostToolHits !== 31) throw new Error('host: expected 31 tool registrations, saw ' + hostToolHits)
+if (hostToolHits !== 33) throw new Error('host: expected 33 tool registrations (+note_status/note_diff), saw ' + hostToolHits)
 // 23 note tools + 8 note management tools + 36 rpc handlers
 // (…/setMarkLook/lists/uiPush/uiAck/scanFolder/importFolder/commitAssets/pickFolder/syncNote/openMirrorDoc/saveNav)
 if (hostHandleHits !== 36) throw new Error('host: expected 36 rpc handlers, saw ' + hostHandleHits)

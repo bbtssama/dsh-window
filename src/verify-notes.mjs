@@ -584,12 +584,23 @@ sessions._m.set(SID_D, sessionWith(SID_D, WS))
   await t('note_import_folder', { dir: WS + '/toolcheck-src', files: ['only.md'] })
   await t('note_assets', { note: 'only' })
   await t('note_sync', { note: 'only' })
+  // The increment protocol's two new tools (review §P0-2). note_status is the self-check; note_diff
+  // answers "what changed since I last read" — a first read has no baseline yet, so the note_read
+  // here establishes one and the diff then has something to compare against.
+  await t('note_status', {})
+  await t('note_diff', {})
+  await t('note_read', { mode: 'full' })
+  await t('note_patch', { startLine: 1, startCol: 0, endLine: 1, endCol: 1, text: '# 全量工具' })
+  await t('note_diff', { format: 'hunks' })
+  await t('note_diff', { format: 'marks' })
+  await t('note_status', {})
+  await t('note_read', { mode: 'auto' })
 }
 const neverCalled = [...tools.keys()].filter((n) => !exercised.has(n))
 ok('every registered tool was exercised on a success path',
   neverCalled.length === 0,
   neverCalled.length ? 'never called: ' + neverCalled.join(',') : exercised.size + ' tools exercised')
-ok('the tool count still matches what the client and the docs expect', tools.size === 31, String(tools.size))
+ok('the tool count still matches what the client and the docs expect', tools.size === 33, String(tools.size))
 
 console.log('every RPC handler answers')
 // One handler, clearSelections, was declared without its `args` parameter while its body used
@@ -1694,6 +1705,68 @@ console.log('the folder picker')
   const browse = await r('pickFolder', {})
   ok('a non-native picker also explains itself', browse.ok === false && /粘贴|弹窗/.test(String(browse.error)), String(browse.error))
   pickerStub = undefined
+}
+
+console.log('the increment protocol: a one-line edit must not cost a full read (§P0-2 acceptance)')
+{
+  const SID_INC = 'session-increment-2222'
+  sessions._m.set(SID_INC, sessionWith(SID_INC, WS))
+  const t = async (name, args) => await asTool(name, args, SID_INC)
+  const render = (name, args, value) => {
+    const tool = tools.get(name)
+    const out = tool.output.render(args || {}, value)
+    return (out && out[0] && out[0].text) || ''
+  }
+  const body = ['# 增量样本', '', '第一段内容', '第二段内容', '第三段内容', ''].join('\n')
+  await t('note_create', { name: '增量样本', text: body })
+  const first = await t('note_read', {})
+  const firstText = render('note_read', {}, first)
+  ok('the first read gives the text and records a baseline',
+    first.kind === 'auto-first' && firstText.indexOf('第一段内容') >= 0 && firstText.indexOf('首次读取') >= 0,
+    first.kind + ' / ' + firstText.split('\n')[0].slice(0, 60))
+  const st0 = await t('note_status', {})
+  ok('note_status then reports "no changes" and stays tiny',
+    st0.changed === false && /无改动/.test(render('note_status', {}, st0)) && Buffer.byteLength(render('note_status', {}, st0), 'utf8') < 400,
+    Buffer.byteLength(render('note_status', {}, st0), 'utf8') + ' B')
+  // The scenario the review is about: the user changes ONE line.
+  await t('note_patch', { startLine: 4, startCol: 0, endLine: 4, endCol: 5, text: '第二段改过了' })
+  const st1 = await t('note_status', {})
+  const st1Text = render('note_status', {}, st1)
+  ok('after a one-line edit note_status reports the delta without any note text',
+    st1.changed === true && /\+1\/-1 行/.test(st1Text) && st1Text.indexOf('第三段内容') < 0,
+    st1Text.replace(/\n/g, ' | ').slice(0, 120))
+  const dr = await t('note_read', {})
+  const drText = render('note_read', {}, dr)
+  ok('and mode:auto answers with the change, NOT the whole note',
+    dr.kind === 'auto-changed' && drText.indexOf('第一段内容') < 0 && Buffer.byteLength(drText, 'utf8') < 700,
+    dr.kind + ' / ' + Buffer.byteLength(drText, 'utf8') + ' B')
+  ok('that auto answer is orders of magnitude cheaper than the full text',
+    Buffer.byteLength(drText, 'utf8') * 3 < Buffer.byteLength(body, 'utf8') + 700,
+    Buffer.byteLength(drText, 'utf8') + ' B vs the ' + Buffer.byteLength(body, 'utf8') + ' B note')
+  const hunks = await t('note_diff', { format: 'hunks' })
+  const hText = render('note_diff', { format: 'hunks' }, hunks)
+  ok('note_diff({format:"hunks"}) shows exactly the edited line',
+    hunks.changed === true && hunks.linesAdded === 1 && hunks.linesRemoved === 1 &&
+    hText.indexOf('第二段改过了') >= 0, hText.replace(/\n/g, ' | ').slice(0, 130))
+  const marksDiff = await t('note_diff', { format: 'marks' })
+  ok('note_diff({format:"marks"}) counts mark changes only',
+    marksDiff.ok === true && marksDiff.linesAdded === 1 &&
+    /标记自 rev \d+ 起：\+0\/-0/.test(render('note_diff', { format: 'marks' }, marksDiff)),
+    render('note_diff', { format: 'marks' }, marksDiff).slice(0, 90))
+  const listed = await t('note_list', {})
+  ok('note_list carries the unread number for the note on screen',
+    typeof listed.unread === 'string' && /\+1\/-1 行/.test(listed.unread), String(listed.unread))
+  // A read that only opens a WINDOW must not claim the agent has seen the rest.
+  await t('note_read', { mode: 'full' })
+  await t('note_patch', { startLine: 5, startCol: 0, endLine: 5, endCol: 5, text: '第三段改过了' })
+  await t('note_read', { mode: 'window', fromLine: 5, toLine: 5 })
+  const afterWindow = await t('note_status', {})
+  ok('a window read does NOT move the baseline (the rest is still unread)',
+    afterWindow.changed === true, render('note_status', {}, afterWindow).replace(/\n/g, ' | ').slice(0, 100))
+  const full = await t('note_read', { mode: 'full' })
+  const afterFull = await t('note_status', {})
+  ok('an explicit mode:"full" does move it, and then there is nothing unread',
+    full.kind === 'full' && afterFull.changed === false, 'kind=' + full.kind + ' changed=' + afterFull.changed)
 }
 
 console.log('the context cost of every tool call (measured, with a baseline ratchet)')
