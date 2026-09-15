@@ -3037,6 +3037,13 @@ return {
         // A block never extends on either input: dragging out of a diagram means nothing.
         const isTouch = (ev && ev.pointerType === 'touch') || modRef.current === 'touch'
         const p0 = pointFromEvent(ev)
+        // A press that has NOT MOVED is not a drag. Touch has its own slop rules below, but a mouse
+        // or trackpad press with a pixel of tremor used to fall straight through to scheduleLive() —
+        // re-seeding the selection from wherever that pixel landed. If it landed on a blank line or
+        // inside a table, the seed took the WHOLE BLOCK (see the block flag in the press timer),
+        // which is exactly the reported "长按不拖动，松手却自动选中一大片，且不可预测". Six pixels
+        // separates tremor from intent; real drags extend as before.
+        if (!isTouch && Math.abs(p0.x - d.x) + Math.abs(p0.y - d.y) < 6) return
         if (d.unit && d.unit !== 'block' && isTouch) {
           const dx = Math.abs(p0.x - d.x)
           const dy = Math.abs(p0.y - d.y)
