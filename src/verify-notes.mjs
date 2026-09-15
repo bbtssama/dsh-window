@@ -1391,6 +1391,15 @@ console.log('the history is wired into the real paths, not just written')
   ok('a stack is pruned against the note list, and an empty list is never taken for "no notes"',
     /if \(navNamesKey === ''\) return/.test(flat) &&
     /const pruned = navPrune\(navRef\.current, navNamesKey\.split\('\\u0000'\)\)/.test(flat), 'prune effect')
+  // Every entry is { name, line }, and the line has to be there for 后退/前进 to come back to a
+  // paragraph rather than to the top of a note. A jump writes it (navRecordJump); leaving a session
+  // is leaving the entry too, so the line being read right now is stamped there as well.
+  ok('the line being read is stamped onto the entry when a session is left',
+    /const leaveLine = topVisibleLine\(\)/.test(flat) &&
+    /stamped\[navRef\.current\.at\] = \{ name: stamped\[navRef\.current\.at\]\.name, line: leaveLine \}/.test(flat), 'park-time stamp')
+  ok('and the entries keep their line through the storage round trip',
+    /list\.push\(\{ name: e\.name, line: Math\.round\(Number\(e\.line\)\) \|\| 0 \}\)/.test(flat) &&
+    /return \{ nav: \{ list: rec\.list\.slice\(\), at: at \}, expired: false \}/.test(flat), 'navReadStore + navFromStore')
   ok('and drops everything that pointed into the other session (target, recorded line, jump nonce)',
     /navTargetRef\.current = null navPendRef\.current = null seenJumpRef\.current = 0/.test(flat), 'session-change block')
   ok('a state answer seeds a still-empty history, so a session whose note name repeats is not blank',

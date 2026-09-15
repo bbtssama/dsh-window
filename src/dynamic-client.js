@@ -1449,6 +1449,16 @@ return {
         restoredForRef.current = ''
         pendingViewRef.current = null
         viewSavedRef.current = { line: 0, note: '' }
+        // Leaving the session is also leaving the entry you are on: stamp the line you are reading
+        // RIGHT NOW onto it, measured live (a plain scroll never touches the stack). Without this a
+        // session parked after reading — no jump, just reading — came back with an entry whose line
+        // was 0, and 前进/后退 would only open the note.
+        const leaveLine = topVisibleLine()
+        if (leaveLine >= 1 && navRef.current.at >= 0 && navRef.current.list[navRef.current.at]) {
+          const stamped = navRef.current.list.slice()
+          stamped[navRef.current.at] = { name: stamped[navRef.current.at].name, line: leaveLine }
+          navRef.current = { list: stamped, at: navRef.current.at }
+        }
         // The visit history belongs to the session being left, not to this one: park it and pick up
         // this session's own. The stacks are PERSISTED, so closing the page (or reloading it) does
         // not lose them; a record nobody has touched for a day is CLEARED rather than loaded (see
