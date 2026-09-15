@@ -159,7 +159,7 @@ const CSS = [
 '.dn-twrap{overflow:auto;margin:10px 0;border:1px solid rgba(0,0,0,.12);border-radius:9px;background:rgba(0,0,0,.02);}',
 '.dn-table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-size:12.5px;line-height:1.6;}',
 '.dn-th,.dn-td{border-right:1px solid rgba(0,0,0,.1);border-bottom:1px solid rgba(0,0,0,.1);padding:6px 10px;vertical-align:top;}',
-'.dn-th{font-weight:650;background:rgba(0,0,0,.035);white-space:nowrap;}',
+'.dn-th{font-weight:650;white-space:nowrap;}',
 '.dn-td{white-space:normal;word-break:break-word;max-width:340px;}',
 '.dn-editor{width:100%;height:100%;min-height:320px;border:1px solid rgba(0,0,0,.12);border-radius:8px;padding:10px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;line-height:1.6;resize:none;background:transparent;color:inherit;outline:none;}',
 '.dn-foot{flex:0 0 auto;padding:5px 12px;border-top:1px solid rgba(0,0,0,.1);font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8f98);display:flex;gap:8px;align-items:center;overflow:hidden;white-space:nowrap;}',
