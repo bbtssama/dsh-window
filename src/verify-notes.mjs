@@ -1425,6 +1425,18 @@ console.log('the history is wired into the real paths, not just written')
   // so nothing was ever adopted and the 后退/前进 menu came up empty after every single refresh.
   ok('an EMPTY stack is never written out (that write is what erased the saved stack on every load)',
     /if \(!Array\.isArray\(navRef\.current\.list\) \|\| navRef\.current\.list\.length === 0\) return/.test(flat), 'saveNavNow guard')
+  ok('a task box is a real button that rewrites the source line through the ordinary save path',
+    /'data-task': '1', 'data-line': line/.test(flat) &&
+    /onClick: function \(e\) \{ e\.stopPropagation\(\); e\.preventDefault\(\); toggleTaskAt\(line\) \}/.test(flat) &&
+    /const next = toggleTaskText\(String\(textRef\.current \|\| ''\), line\)/.test(flat) &&
+    /host\.call\('saveText', \{ text: next, baseRevision: revRef\.current, sessionId: sidRef\.current \}\)/.test(flat) &&
+    /if \(r && r\.conflict\) \{ notify\('笔记已被外部改动，本次未写入；请先\[重载\]再试'\); return \}/.test(flat), 'task box')
+  ok('the mark-list preview maps its fragment lines back to the note, and stays read-only for another note',
+    /function markBlocks\(text, startLine, live\)/.test(flat) &&
+    /taskMarker\(b, Math\.max\(1, Math\.round\(Number\(startLine\) \|\| 1\) \+ b\.line - 1\)\)/.test(flat) &&
+    /markBlocks\(m\.text, m\.startLine, cross !== true\)/.test(flat), 'mark preview')
+  ok('the task box keeps its pointer events to itself (a click never starts a text selection)',
+    /onPointerDown: function \(e\) \{ e\.stopPropagation\(\) \}/.test(flat), 'pointerdown')
   ok('and the state answer\'s stack is adopted while ours is still empty',
     /if \(r\.nav !== undefined && navRef\.current\.at < 0\) \{/.test(flat) &&
     /const fromHost = navFromHost\(r\.nav, Date\.now\(\), NAV_TTL_MS\)/.test(flat), 'applyState')
@@ -1582,6 +1594,50 @@ console.log('the visit stack is persisted, and a record older than a day is clea
       nav.host({ list: [null, { nope: 1 }], at: 0, updatedAt: NOW }, NOW, TTL) === null, 'host validation')
     ok('the host\'s cursor is clamped into the list it actually sent',
       (function () { const h = nav.host({ list: one, at: 99, updatedAt: NOW }, NOW, TTL); return h && h.at === 0 })(), 'clamped')
+  }
+}
+
+console.log('clickable task boxes (- [ ] / - [x]), the way Typora does it')
+// The rendered box was a plain span with ☐/☑, so a click did nothing. It is a button now, and the
+// rewrite is a pure function so the rules can be tested instead of described.
+{
+  const START = '/* TASK-PURE-START */'
+  const END = '/* TASK-PURE-END */'
+  const src = fsSync.readFileSync(new URL('./dynamic-client.js', import.meta.url), 'utf8')
+  const a = src.indexOf(START)
+  const b = src.indexOf(END)
+  let task = null
+  try {
+    task = new Function(src.slice(a + START.length, b) + '\nreturn { line: toggleTaskLine, text: toggleTaskText }')()
+  } catch (err) { }
+  ok('the task toggler is extractable from the client source',
+    task !== null && typeof task.line === 'function' && typeof task.text === 'function', String(a) + ',' + String(b))
+  if (task) {
+    ok('clicking an empty box writes [x]', task.line('- [ ] ② 启动 service') === '- [x] ② 启动 service', task.line('- [ ] ② 启动 service'))
+    ok('clicking a checked box writes [ ] back', task.line('- [x] ② 启动 service') === '- [ ] ② 启动 service', task.line('- [x] ② 启动 service'))
+    ok('an uppercase [X] counts as checked and toggles back to empty',
+      task.line('- [X] note') === '- [ ] note', task.line('- [X] note'))
+    ok('the indentation and the bullet character are left alone',
+      task.line('    * [ ] nested') === '    * [x] nested' && task.line('\t+ [x] tab') === '\t+ [ ] tab', 'indent + marker')
+    ok('the rest of the line is untouched, including later brackets',
+      task.line('- [ ] a [b] c [x]') === '- [x] a [b] c [x]', task.line('- [ ] a [b] c [x]'))
+    ok('a box that is not at the start of the line is not a task item',
+      task.line('see - [ ] this') === null && task.line('text [ ] more') === null, 'mid-line')
+    ok('a plain bullet, a heading, a quote and a numbered item are not task items',
+      task.line('- plain') === null && task.line('# title') === null &&
+      task.line('> - [ ] quoted') === null && task.line('1. [ ] numbered') === null, 'other blocks')
+    ok('an ordered-list box is NOT touched (Typora only rewrites the -/*/+ form)',
+      task.line('1. [ ] item') === null, 'ordered')
+    ok('an empty or missing line changes nothing',
+      task.line('') === null && task.line(undefined) === null && task.line(null) === null, 'empty')
+    const doc = ['# 标题', '- [ ] 第一步', '  文字', '- [x] 第二步', ''].join('\n')
+    ok('the whole-document form rewrites exactly one line, by its 1-based number',
+      task.text(doc, 2) === '# 标题\n- [x] 第一步\n  文字\n- [x] 第二步\n' &&
+      task.text(doc, 4) === '# 标题\n- [ ] 第一步\n  文字\n- [ ] 第二步\n', 'document')
+    ok('the document form leaves every other line byte-identical',
+      task.text(doc, 2).split('\n')[0] === '# 标题' && task.text(doc, 2).split('\n')[4] === '', 'rest')
+    ok('a line number outside the document, or a non-task line, writes nothing',
+      task.text(doc, 0) === null && task.text(doc, 99) === null && task.text(doc, 1) === null, 'bounds')
   }
 }
 
