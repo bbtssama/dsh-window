@@ -1270,10 +1270,11 @@ console.log('the back/forward history (a pure function, so it can be tested at a
   const b = src.indexOf(END)
   let nav = null
   try {
-    nav = new Function(src.slice(a + START.length, b) + '\nreturn { push: navPushVisit, jump: navRecordJump }')()
+    nav = new Function(src.slice(a + START.length, b) + '\nreturn { push: navPushVisit, jump: navRecordJump, session: navSwapSession }')()
   } catch (err) { }
   ok('the history builder is extractable from the client source',
-    nav !== null && typeof nav.push === 'function' && typeof nav.jump === 'function', String(a) + ',' + String(b))
+    nav !== null && typeof nav.push === 'function' && typeof nav.jump === 'function' && typeof nav.session === 'function',
+    String(a) + ',' + String(b))
   if (nav) {
     const empty = () => ({ list: [], at: -1 })
     let h = nav.push(empty(), '甲', 0)
@@ -1323,6 +1324,36 @@ console.log('the back/forward history (a pure function, so it can be tested at a
     ok('a missing or junk line becomes 0 rather than NaN',
       nav.jump(empty(), 'x', undefined, undefined).list.length === 0 &&
       nav.push(empty(), '己', 'nonsense').list[0].line === 0, 'undefined / string')
+    // The reported leak: the history is a ref on a component that survives a session switch, so a
+    // new session inherited the previous one's notes — and a note name of another session is not in
+    // this session's store at all, so clicking 后退 could only fail.
+    let a1 = nav.push(empty(), '甲1', 0)
+    a1 = nav.jump(a1, '甲1', 20, 5)
+    let store = {}
+    let cur = a1
+    const toB = nav.session(store, '会话A', '会话B', cur)
+    store = toB.store
+    cur = toB.nav
+    ok('switching session hands over an EMPTY history, not the previous session\'s notes',
+      cur.list.length === 0 && cur.at === -1, JSON.stringify(cur))
+    cur = nav.push(cur, '乙1', 0)
+    const backToA = nav.session(store, '会话B', '会话A', cur)
+    store = backToA.store
+    ok('the new session records its own notes only',
+      backToA.store['会话B'].list.length === 1 && backToA.store['会话B'].list[0].name === '乙1',
+      JSON.stringify(backToA.store['会话B'].list))
+    ok('and going back to the first session returns ITS history, untouched by the second one',
+      backToA.nav.list.length === 2 && backToA.nav.at === 1 && backToA.nav.list.every((e) => e.name.indexOf('甲') === 0),
+      JSON.stringify(backToA.nav.list))
+    ok('no entry of one session is ever reachable while the other one is on screen',
+      backToA.nav.list.every((e) => e.name.indexOf('乙') < 0), JSON.stringify(backToA.nav.list))
+    const sameSid = nav.session(store, '会话A', '会话A', backToA.nav)
+    ok('a render without a session change returns the very same history object',
+      sameSid.nav === backToA.nav && sameSid.store === store, 'same sid')
+    const firstEver = nav.session(store, '', '会话C', { list: [], at: -1 })
+    ok('the first visit to a session (from no session at all) starts empty and parks nothing',
+      firstEver.nav.list.length === 0 && Object.keys(firstEver.store).length === Object.keys(store).length,
+      JSON.stringify(Object.keys(firstEver.store)))
   }
 }
 
@@ -1342,6 +1373,14 @@ console.log('the history is wired into the real paths, not just written')
     /navPendRef\.current = entry\.line >= 1 \? entry\.name : null/.test(flat), 'navGo')
   ok('the menu names the recorded line, so an entry inside this note does not read as a no-op',
     /e\.name === noteName && e\.line >= 1 \? '（第 ' \+ e\.line \+ ' 行）'/.test(flat), 'navLabel')
+  ok('a session switch parks the history being left and picks up this session\'s own',
+    /const swapped = navSwapSession\(navBySidRef\.current, navSidRef\.current, sidRef\.current, navRef\.current\)/.test(flat) &&
+    /navRef\.current = swapped\.nav/.test(flat), 'session-change block')
+  ok('and drops everything that pointed into the other session (target, recorded line, jump nonce)',
+    /navTargetRef\.current = null navPendRef\.current = null seenJumpRef\.current = 0/.test(flat), 'session-change block')
+  ok('a state answer seeds a still-empty history, so a session whose note name repeats is not blank',
+    /if \(incoming !== '' && navRef\.current\.at < 0\) navRef\.current = navPushVisit\(navRef\.current, incoming, 0\)/.test(flat),
+    'applyState')
 }
 
 console.log('the folder picker')
