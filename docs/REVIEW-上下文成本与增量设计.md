@@ -878,3 +878,48 @@ verify-durability` 全绿。
    不是本插件单独能实现的。
 3. **工具数 ≤18（§P2-10）**：本次从 33 降到 32。继续砍到 18 意味着合并 `note_read/write/patch/find` 这类
    **语义不同**的工具，会把"选错工具"的风险换成"参数记错"的风险 —— 需要新一轮设计评审，不宜顺手做。
+
+---
+
+# 验收记录（Live Acceptance · 真实宿主 + 真实浏览器）
+
+**方法**：不用测试替身 —— 在**重启后的真实 dsh 进程**上，用新工具面（32 个）逐项调用，
+并用 Playwright 驱动 `http://localhost:3080` 上**真实运行的卡片**（真实 RPC、真实文件、真实 git）。
+
+## 一、逐项验收（全部通过）
+
+| 验收项 | 证据 |
+|---|---|
+| P1-7 `note_create` 建仓 | 返回「9 行, **git 已就绪**」；磁盘上 `.git` 已存在，`git log` 有 `note: init` |
+| P1-5 状态文件出 git | 新笔记 `.gitignore` = `.note-view.json` + `.note-state.json`；`git ls-files` 只有 `.keep`/`note.md`；`.note-state.json` 不在跟踪列表 |
+| P1-6 提交信息带 delta | `note(content): 2 files changed, 6 insertions(+), 3 deletions(-), 标记 2 条 (rev 26)` |
+| P0-2 增量协议 | 241 行笔记改 1 行：`note_status` 221 B / `note_read(mode:auto)` 298 B / `note_diff(hunks)` 184 B，而整篇读取 13278 B |
+| P0-4 标记归属 | 卡片画的重点（RPC `addSelection`）→ `note_mark_new` 取到；agent 自己 `note_mark_add` 的标记**不会**被 `note_mark_new` 取到；`redeliver:true` 可反复领取且不消耗；`author:"agent"` 单独列出自己加的 |
+| 合并 `note_patch({edits})` | 一次改两处（替换 + 删行）：`-11 +6 字符，现 8 行`，且内部从后往前应用无错位 |
+| 合并 `note_commit({reason})` | 卡片改了任务框（未提交）→ `note_commit({reason})` → 提交信息就是 reason |
+| `note_append` / `note_replace` | 追加与覆盖都成功，且各自立即自动提交 |
+| 卡片可点的任务框 | Playwright 真点击 ☐ → 磁盘 `- [ ]` 变 `- [x]` |
+| `note_card_ui` | `open` 打开标记列表（2 条，含样式/添加到/改备注/删除）、`float` 拖成独立小窗、`dock`+`close` 收回 |
+| `note_card_panel` | `collapse` → 右下角小药丸；`expand` → 卡片回到原停靠位 |
+| `note_scroll_to` | 产生一次 jump 事件（`view.jump=1`，带 `jumpAt`） |
+| 进退栈持久化 | 刷新页面后宿主里仍有 4 条（`大笔记@965 / spring@1047 / … / 验收·dsh-window@1`），游标 `at=3` 指向当前笔记 |
+| `note_mark_lists` | `create` + `add` → 列表里出现《验收清单》1 条；`delete` 清干净 |
+| `note_clear_keep_history` | 正文清空、`git log` 6 条历史全在 |
+| `note_delete_forever` | 整目录连同 `.git` 删除，笔记数回到 160 |
+| 浏览器控制台 | 全程 **0 error / 0 warning** |
+
+## 二、验收发现的 4 个真实缺陷（已修 + 已加回归断言，`5414588`）
+
+真实宿主跑出来的，测试替身里看不出来（因为替身总是"有一份可解析的状态文件"）：
+
+1. **`note_status` 在"还没有基线"时会说「没有改动，不必读正文」** —— 与事实相反（没读过 = 应该读一次）。
+   现在明确回答「还没有基线：先 note_read({mode:"auto"}) 读一次」。
+2. **`note_diag` 在成功提交后仍说「有未提交改动」** —— `S.touched` 只在切换笔记时才清。现在
+   `commit()` 在"真的提交了"和"没有需要提交的改动"两条路径上都会清掉它。
+3. **`note_read` / `note_find` / `note_diag` 会 `markTouched()`** —— 只是**读**一下就把笔记标成"有改动"，
+   还顺带把 `rev` 自增（使 `rev` 失去"变更计数"的意义）。三个只读工具不再动状态。
+4. **增量基线会跨笔记泄漏** —— `load()` 不清 `S.lastRead`：新笔记（还没有状态文件）会继承**上一份笔记**的
+   基线，于是 `note_status` 对一份从没读过的笔记回答「自你上次读取（rev 4，0 秒前）」。
+   现在 `load()` 复位 `lastRead / unreadText / stateUntracked / stateChecked`。
+
+**验收结论**：四个套件 326 条断言全绿（新增 4 条正是上面 4 个缺陷的回归），真实宿主 + 真实浏览器逐项通过。
