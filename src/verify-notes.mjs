@@ -1737,6 +1737,39 @@ console.log('the increment protocol: a one-line edit must not cost a full read (
   ok('note_status then reports "no changes" and stays tiny',
     st0.changed === false && /无改动/.test(render('note_status', {}, st0)) && Buffer.byteLength(render('note_status', {}, st0), 'utf8') < 400,
     Buffer.byteLength(render('note_status', {}, st0), 'utf8') + ' B')
+  // Live acceptance found this: with NO baseline yet the answer used to end with "（没有改动，不必读正文）"
+  // — the opposite of the truth on a note nobody has read. A fresh note has to be told to read once.
+  {
+    const fresh = await t('note_create', { name: '无基线样本', text: '# 无基线样本\n\n甲\n' })
+    const freshText = render('note_status', {}, await t('note_status', {}))
+    ok('a note with no baseline yet is told to read once, not told "nothing changed"',
+      fresh.ok === true && /还没有基线/.test(freshText) && /note_read/.test(freshText) && !/不必读正文/.test(freshText),
+      freshText.replace(/\n/g, ' | ').slice(0, 130))
+    await t('note_delete_forever', { name: '无基线样本', confirm: true })
+  }
+  // And the other live finding: note_diag claimed "标记有未提交改动" immediately after a successful
+  // commit, because `touched` was only ever cleared by switching notes.
+  {
+    await t('note_create', { name: '提交标志样本', text: '# 提交标志样本\n\n甲行内容\n' })
+    await t('note_mark_add', { startLine: 3, startCol: 0, endLine: 3, endCol: 3 })
+    const beforeCommit = await t('note_diag', {})
+    const committed = await t('note_commit', { reason: 'delta 验收检查点' })
+    const afterCommit = await t('note_diag', {})
+    ok('a commit clears the uncommitted flag note_diag reports',
+      beforeCommit.marksDirty === true && committed.ok === true && afterCommit.marksDirty === false,
+      JSON.stringify({ before: beforeCommit.marksDirty, hash: committed.hash, after: afterCommit.marksDirty }))
+    // …and looking at the note must not change it either: note_read/note_find/note_diag all called
+    // markTouched(), which both flagged the note dirty and bumped `rev` on every read.
+    const revBefore = afterCommit.rev
+    await t('note_read', { mode: 'auto' })
+    await t('note_find', { query: '甲行' })
+    const afterReads = await t('note_diag', {})
+    ok('read-only tools do not flag the note as changed and do not bump rev',
+      afterReads.marksDirty === false && afterReads.rev === revBefore,
+      JSON.stringify({ revBefore: revBefore, revAfter: afterReads.rev, dirty: afterReads.marksDirty }))
+    await t('note_delete_forever', { name: '提交标志样本', confirm: true })
+    await t('note_open', { name: '增量样本' })
+  }
   // The scenario the review is about: the user changes ONE line.
   await t('note_patch', { startLine: 4, startCol: 0, endLine: 4, endCol: 5, text: '第二段改过了' })
   const st1 = await t('note_status', {})
