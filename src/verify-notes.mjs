@@ -1372,8 +1372,9 @@ console.log('the history is wired into the real paths, not just written')
     /const recorded = navPendRef\.current === incoming && pendingViewRef\.current !== null/.test(flat), 'applyState restore')
   ok('and it is marked for exactly the note 后退/前进 is heading to',
     /navPendRef\.current = entry\.line >= 1 \? entry\.name : null/.test(flat), 'navGo')
-  ok('the menu names the recorded line, so an entry inside this note does not read as a no-op',
-    /e\.name === noteName && e\.line >= 1 \? '（第 ' \+ e\.line \+ ' 行）'/.test(flat), 'navLabel')
+  ok('the menu shows the recorded line of every entry that has one, so the stack reads as "back to that paragraph"',
+    // NOTE: `flat` collapses every run of whitespace to one space, so the padded label reads ' · 第 ' here.
+    /e\.line >= 1 \? ' · 第 ' \+ e\.line \+ ' 行' : ''\)/.test(flat), 'navLabel')
   ok('a session switch parks the history being left and picks up this session\'s own',
     /const swapped = navSwapSession\(navStore, navSidRef\.current, sidRef\.current, navRef\.current, Date\.now\(\), NAV_TTL_MS\)/.test(flat) &&
     /navRef\.current = swapped\.nav/.test(flat), 'session-change block')
@@ -1385,9 +1386,15 @@ console.log('the history is wired into the real paths, not just written')
     /navPackStore\(map, Date\.now\(\), NAV_TTL_MS\)/.test(flat), 'writeNavStore')
   ok('the live session\'s stack is stamped each time it is saved, parked ones keep their own clock',
     /store\[live\] = \{ list: navRef\.current\.list, at: navRef\.current\.at, ts: Date\.now\(\) \}/.test(flat), 'saveNavNow')
-  ok('the stacks are persisted from every place that changes one (7 call sites, exactly one definition)',
-    (flat.match(/saveNavNow\(\)/g) || []).length === 8 && (flat.match(/function saveNavNow\(\)/g) || []).length === 1,
+  ok('the stacks are persisted from every place that changes one (10 call sites, exactly one definition)',
+    (flat.match(/saveNavNow\(\)/g) || []).length === 11 && (flat.match(/function saveNavNow\(\)/g) || []).length === 1,
     String((flat.match(/saveNavNow\(\)/g) || []).length) + ' occurrences of saveNavNow()')
+  // A stack entry is pushed with line 0 when its note is opened, and it used to get a real line only
+  // when the reader LEFT it — so anybody reading a note saw `line: 0` in the stored stack, and a reload
+  // could not come back to that line ("栈里面行还是没有被持久化"). The two places that record where the
+  // reader is stamp the entry the cursor is on, and persist it.
+  ok('the cursor entry follows the reader, so a stored stack never shows the 0 of a just-opened note',
+    (flat.match(/stampNavLine\(line\) saveNavNow\(\)/g) || []).length === 3, 'saveViewNow + applyPendingView x2')
   ok('a stack is pruned against the note list, and an empty list is never taken for "no notes"',
     /if \(navNamesKey === ''\) return/.test(flat) &&
     /const pruned = navPrune\(navRef\.current, navNamesKey\.split\('\\u0000'\)\)/.test(flat), 'prune effect')
