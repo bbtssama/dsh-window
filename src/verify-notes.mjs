@@ -1270,10 +1270,11 @@ console.log('the back/forward history (a pure function, so it can be tested at a
   const b = src.indexOf(END)
   let nav = null
   try {
-    nav = new Function(src.slice(a + START.length, b) + '\nreturn { push: navPushVisit, jump: navRecordJump, session: navSwapSession }')()
+    nav = new Function(src.slice(a + START.length, b) + '\nreturn { push: navPushVisit, jump: navRecordJump, session: navSwapSession, read: navReadStore, take: navFromStore, pack: navPackStore, prune: navPrune }')()
   } catch (err) { }
   ok('the history builder is extractable from the client source',
-    nav !== null && typeof nav.push === 'function' && typeof nav.jump === 'function' && typeof nav.session === 'function',
+    nav !== null && typeof nav.push === 'function' && typeof nav.jump === 'function' && typeof nav.session === 'function' &&
+    typeof nav.read === 'function' && typeof nav.take === 'function' && typeof nav.pack === 'function' && typeof nav.prune === 'function',
     String(a) + ',' + String(b))
   if (nav) {
     const empty = () => ({ list: [], at: -1 })
@@ -1366,7 +1367,7 @@ console.log('the history is wired into the real paths, not just written')
   ok('the jump the host reports feeds the history with the line the reader is standing on',
     /navRecordJump\(navRef\.current, incoming, r\.view\.line, topVisibleLine\(\)/.test(flat), 'applyState jump branch')
   ok('a jump that lands in the note already open goes through the geometry counter (nothing else would move it)',
-    /navTargetRef\.current = null if \(entry\.line >= 1\) bump\(\) return/.test(flat), 'navGo')
+    /navTargetRef\.current = null saveNavNow\(\) if \(entry\.line >= 1\) bump\(\) return/.test(flat), 'navGo')
   ok('a recorded line outranks the host view when a note is entered by 后退/前进',
     /const recorded = navPendRef\.current === incoming && pendingViewRef\.current !== null/.test(flat), 'applyState restore')
   ok('and it is marked for exactly the note 后退/前进 is heading to',
@@ -1374,8 +1375,22 @@ console.log('the history is wired into the real paths, not just written')
   ok('the menu names the recorded line, so an entry inside this note does not read as a no-op',
     /e\.name === noteName && e\.line >= 1 \? '（第 ' \+ e\.line \+ ' 行）'/.test(flat), 'navLabel')
   ok('a session switch parks the history being left and picks up this session\'s own',
-    /const swapped = navSwapSession\(navBySidRef\.current, navSidRef\.current, sidRef\.current, navRef\.current\)/.test(flat) &&
+    /const swapped = navSwapSession\(navStore, navSidRef\.current, sidRef\.current, navRef\.current, Date\.now\(\), NAV_TTL_MS\)/.test(flat) &&
     /navRef\.current = swapped\.nav/.test(flat), 'session-change block')
+  ok('the persisted map is read on the way in, and the memory of this page wins over it',
+    /const navStore = Object\.assign\(\{\}, readNavStore\(\), navBySidRef\.current\)/.test(flat), 'session-change block')
+  ok('a record past the ttl is DELETED, not kept for the next write to store again',
+    /if \(swapped\.expired\) delete navBySidRef\.current\[sidRef\.current\]/.test(flat), 'session-change block')
+  ok('every write goes through the ttl filter (that is what keeps the stored map bounded)',
+    /navPackStore\(map, Date\.now\(\), NAV_TTL_MS\)/.test(flat), 'writeNavStore')
+  ok('the live session\'s stack is stamped each time it is saved, parked ones keep their own clock',
+    /store\[live\] = \{ list: navRef\.current\.list, at: navRef\.current\.at, ts: Date\.now\(\) \}/.test(flat), 'saveNavNow')
+  ok('the stacks are persisted from every place that changes one (6 call sites, exactly one definition)',
+    (flat.match(/saveNavNow\(\)/g) || []).length === 7 && (flat.match(/function saveNavNow\(\)/g) || []).length === 1,
+    String((flat.match(/saveNavNow\(\)/g) || []).length) + ' occurrences of saveNavNow()')
+  ok('a stack is pruned against the note list, and an empty list is never taken for "no notes"',
+    /if \(navNamesKey === ''\) return/.test(flat) &&
+    /const pruned = navPrune\(navRef\.current, navNamesKey\.split\('\\u0000'\)\)/.test(flat), 'prune effect')
   ok('and drops everything that pointed into the other session (target, recorded line, jump nonce)',
     /navTargetRef\.current = null navPendRef\.current = null seenJumpRef\.current = 0/.test(flat), 'session-change block')
   ok('a state answer seeds a still-empty history, so a session whose note name repeats is not blank',
@@ -1457,6 +1472,71 @@ console.log('the note-menu expansion is per session too (it leaked across a sess
       menu.of(noSid, 'S2')['folder:other'] === true, JSON.stringify(Object.keys(noSid)))
     ok('an undefined session id reads as collapsed rather than throwing',
       Object.keys(menu.of(s1, undefined)).length === 0 && Object.keys(menu.of(null, 'S1')).length === 0, 'undefined / null')
+  }
+}
+
+console.log('the visit stack is persisted, and a record older than a day is cleared instead of loaded')
+// The stacks survive a reload now, which is what makes them worth keeping at all — but a stack nobody
+// has touched for a day is the one most likely to name notes that were renamed or deleted while that
+// session was away, and those entries cannot be opened at all ("其中的笔记已经点击不跳转了").
+{
+  const START = '/* NAV-PURE-START */'
+  const END = '/* NAV-PURE-END */'
+  const src = fsSync.readFileSync(new URL('./dynamic-client.js', import.meta.url), 'utf8')
+  const a = src.indexOf(START)
+  const b = src.indexOf(END)
+  let nav = null
+  try {
+    nav = new Function(src.slice(a + START.length, b) + '\nreturn { session: navSwapSession, read: navReadStore, take: navFromStore, pack: navPackStore, prune: navPrune }')()
+  } catch (err) { }
+  ok('the persistence helpers are extractable from the client source',
+    nav !== null && typeof nav.read === 'function' && typeof nav.take === 'function' &&
+    typeof nav.pack === 'function' && typeof nav.prune === 'function', String(a) + ',' + String(b))
+  if (nav) {
+    const HOUR = 3600 * 1000
+    const TTL = 24 * HOUR
+    const NOW = 1000000000000
+    const rec = (list, at, ts) => ({ list: list, at: at, ts: ts })
+    const one = [{ name: '甲', line: 7 }]
+    ok('unreadable storage reads as an empty map instead of throwing',
+      Object.keys(nav.read('{oops')).length === 0 && Object.keys(nav.read(null)).length === 0 &&
+      Object.keys(nav.read('[1,2]')).length === 0, 'junk in, nothing out')
+    ok('a stored record is accepted field by field, and a broken entry is dropped rather than trusted',
+      (function () {
+        const s = nav.read(JSON.stringify({ S1: { list: [{ name: '甲', line: '7' }, { nope: 1 }, null], at: 99, ts: NOW }, S2: { list: [] } }))
+        return !!s.S1 && s.S1.list.length === 1 && s.S1.list[0].line === 7 && s.S1.at === 0 && s.S2 === undefined
+      })(), 'validated')
+    ok('a record inside the ttl is loaded, with its cursor',
+      nav.take({ S1: rec(one, 0, NOW - HOUR) }, 'S1', NOW, TTL).nav.list.length === 1 &&
+      nav.take({ S1: rec(one, 0, NOW - HOUR) }, 'S1', NOW, TTL).nav.at === 0, 'fresh')
+    ok('a record older than the ttl is NOT loaded, and the caller is told so it can be cleared',
+      (function () {
+        const g = nav.take({ S1: rec(one, 0, NOW - TTL - 1) }, 'S1', NOW, TTL)
+        return g.nav.list.length === 0 && g.nav.at === -1 && g.expired === true
+      })(), 'expired')
+    ok('exactly at the ttl it is still usable — only OLDER is expired',
+      nav.take({ S1: rec(one, 0, NOW - TTL) }, 'S1', NOW, TTL).expired === false, 'boundary')
+    ok('a session with no record is empty and NOT reported as expired',
+      (function () { const g = nav.take({}, 'S9', NOW, TTL); return g.nav.list.length === 0 && g.expired === false })(), 'missing')
+    ok('a record that was never stamped counts as expired rather than eternal',
+      nav.take({ S1: rec(one, 0, 0) }, 'S1', NOW, TTL).expired === true, 'ts=0')
+    ok('writing the map back drops the expired records and keeps the fresh ones',
+      Object.keys(nav.pack({ A: rec(one, 0, NOW - HOUR), B: rec(one, 0, NOW - TTL - 5), C: rec([], 0, NOW) }, NOW, TTL)).join(',') === 'A',
+      'bounded storage')
+    ok('a switch stamps the parked stack with the moment it was taken',
+      (function () { const s = nav.session({}, 'A', 'B', { list: one, at: 0 }, NOW, TTL); return s.store.A.ts === NOW && s.nav.list.length === 0 })(), 'park')
+    ok('and it loads the other session straight out of the persisted map',
+      (function () { const s = nav.session({ B: rec(one, 0, NOW - HOUR) }, 'A', 'B', { list: [], at: -1 }, NOW, TTL); return s.nav.list.length === 1 && s.expired === false })(), 'load')
+    ok('an expired record for the session being opened is cleared instead of loaded, and says so',
+      (function () { const s = nav.session({ B: rec(one, 0, NOW - TTL - 1) }, 'A', 'B', { list: [], at: -1 }, NOW, TTL); return s.nav.list.length === 0 && s.expired === true })(), 'cleared')
+    ok('an entry naming a note that no longer exists is removed from the stack',
+      (function () { const p = nav.prune({ list: [{ name: '甲', line: 1 }, { name: '乙', line: 2 }], at: 1 }, ['乙']); return p.list.length === 1 && p.list[0].name === '乙' && p.at === 0 })(), 'prune')
+    ok('the cursor stays on the same ENTRY, not on the same index',
+      (function () { const p = nav.prune({ list: [{ name: '甲', line: 1 }, { name: '乙', line: 2 }, { name: '丙', line: 3 }], at: 1 }, ['乙', '丙']); return p.list.length === 2 && p.at === 0 && p.list[p.at].name === '乙' })(), 'cursor')
+    ok('when the cursor\'s own note is gone too, the cursor lands on the last surviving entry',
+      (function () { const p = nav.prune({ list: [{ name: '甲', line: 1 }, { name: '乙', line: 2 }, { name: '丙', line: 3 }], at: 1 }, ['甲', '丙']); return p.list.length === 2 && p.at === 1 && p.list[p.at].name === '丙' })(), 'cursor fallback')
+    ok('a stack whose notes all still exist is handed back untouched (same object, so no write happens)',
+      (function () { const same = { list: one, at: 0 }; return nav.prune(same, ['甲']) === same })(), 'no-op')
   }
 }
 
