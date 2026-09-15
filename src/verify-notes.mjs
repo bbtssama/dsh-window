@@ -1381,6 +1381,66 @@ console.log('the history is wired into the real paths, not just written')
   ok('a state answer seeds a still-empty history, so a session whose note name repeats is not blank',
     /if \(incoming !== '' && navRef\.current\.at < 0\) navRef\.current = navPushVisit\(navRef\.current, incoming, 0\)/.test(flat),
     'applyState')
+  ok('a session switch also forgets where the reader was in the session being left',
+    /restoredForRef\.current = '' pendingViewRef\.current = null viewSavedRef\.current = \{ line: 0, note: '' \}/.test(flat),
+    'session-change block')
+  ok('the menu reads its expansion for the session on screen',
+    /buildNoteMenuRows\(notes, openGroupsOf\(openGroups, openGroupsSid\)\)/.test(flat), 'menu read')
+  ok('and writes it there too, instead of into one object shared by every session',
+    /setOpenGroups\(function \(prev\) \{ return openGroupToggle\(prev, openGroupsSid, r\.key\) \}\)/.test(flat), 'menu write')
+  // The auto-save timer holds a window.setTimeout id (f09aaaa replaced the ctx.timeout disposer);
+  // `flush()` went on CALLING it, which threw a TypeError — so a 保存 or a note switch within 900ms
+  // of a keystroke did nothing at all.
+  ok('the auto-save timer is cancelled, never called as a function',
+    src.indexOf('saveTimer.current()') < 0 &&
+    /if \(saveTimer\.current\) \{ try \{ window\.clearTimeout\(saveTimer\.current\) \} catch \(err\) \{ \} saveTimer\.current = 0 \}/.test(flat),
+    'flush + onDraft + the session switch')
+  ok('a session switch hands the unsaved edits back to the session they were typed in',
+    /rescueRef\.current = \{ sid: leavingSid, rev: revRef\.current, text: draftRef\.current, note: noteNameRef\.current \}/.test(flat) &&
+    /host\.call\('saveText', \{ text: r\.text, baseRevision: r\.rev, sessionId: r\.sid \}\)/.test(flat), 'rescue')
+  ok('and kills the timer that would have written them into this session\'s note',
+    /window\.clearTimeout\(saveTimer\.current\) \} catch \(err\) \{ \} saveTimer\.current = 0 \} dirtyRef\.current = false/.test(flat), 'session-change block')
+  ok('the editor and the live selection of the session just left are dropped with it',
+    /setLive\(null\); setMagnify\(null\); setEditBlock\(null\); editBlockRef\.current = null; hideBar\(\)/.test(flat) &&
+    /if \(mode === 'edit'\) setMode\('read'\)/.test(flat), 'session-change effect')
+}
+
+console.log('the note-menu expansion is per session too (it leaked across a session switch)')
+// Same class as the history leak: the expanded folders were one object shared by every session, so a
+// folder opened in one session decided what the next one showed. The state is the whole map now,
+// read and written through these two helpers.
+{
+  const START = '/* MENU-STATE-PURE-START */'
+  const END = '/* MENU-STATE-PURE-END */'
+  const src = fsSync.readFileSync(new URL('./dynamic-client.js', import.meta.url), 'utf8')
+  const a = src.indexOf(START)
+  const b = src.indexOf(END)
+  let menu = null
+  try {
+    menu = new Function(src.slice(a + START.length, b) + '\nreturn { of: openGroupsOf, toggle: openGroupToggle }')()
+  } catch (err) { }
+  ok('the per-session expansion helpers are extractable from the client source',
+    menu !== null && typeof menu.of === 'function' && typeof menu.toggle === 'function', String(a) + ',' + String(b))
+  if (menu) {
+    const EMPTY = {}
+    ok('a session that never expanded anything reads as collapsed', Object.keys(menu.of(EMPTY, 'S1')).length === 0, 'empty')
+    const s1 = menu.toggle(EMPTY, 'S1', 'folder:root')
+    ok('expanding a folder records it for that session only',
+      menu.of(s1, 'S1')['folder:root'] === true && Object.keys(menu.of(s1, 'S2')).length === 0, JSON.stringify(s1))
+    ok('the map the card handed in is never mutated (the state stays pure)',
+      Object.keys(EMPTY).length === 0, JSON.stringify(EMPTY))
+    ok('toggling the same row again collapses it',
+      menu.of(menu.toggle(s1, 'S1', 'folder:root'), 'S1')['folder:root'] === false, 'twice')
+    const s2 = menu.toggle(s1, 'S2', 'folder:other')
+    ok('the second session\'s expansion does not disturb the first one\'s',
+      menu.of(s2, 'S1')['folder:root'] === true && menu.of(s2, 'S2')['folder:other'] === true, JSON.stringify(s2))
+    const noSid = menu.toggle(s2, '', 'k')
+    ok('a missing session id is a bucket of its own instead of leaking into a real session',
+      menu.of(noSid, '')['k'] === true && menu.of(noSid, 'S1')['folder:root'] === true &&
+      menu.of(noSid, 'S2')['folder:other'] === true, JSON.stringify(Object.keys(noSid)))
+    ok('an undefined session id reads as collapsed rather than throwing',
+      Object.keys(menu.of(s1, undefined)).length === 0 && Object.keys(menu.of(null, 'S1')).length === 0, 'undefined / null')
+  }
 }
 
 console.log('the folder picker')
