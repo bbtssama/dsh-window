@@ -1257,6 +1257,90 @@ console.log('the note menu tree (a pure function, so it can be tested at all)')
     '157 notes')
 }
 
+console.log('the back/forward history (a pure function, so it can be tested at all)')
+// 后退/前进 over the notes this card has visited, capped at 50 entries. The reported bug is encoded
+// here: a jump INSIDE the note being read changes no note name, so the `[noteName]` effect recorded
+// nothing — 后退 left for the previous NOTE instead of returning to the paragraph just left
+// ("跳转是成功的，只是栈里没有").
+{
+  const START = '/* NAV-PURE-START */'
+  const END = '/* NAV-PURE-END */'
+  const src = fsSync.readFileSync(new URL('./dynamic-client.js', import.meta.url), 'utf8')
+  const a = src.indexOf(START)
+  const b = src.indexOf(END)
+  let nav = null
+  try {
+    nav = new Function(src.slice(a + START.length, b) + '\nreturn { push: navPushVisit, jump: navRecordJump }')()
+  } catch (err) { }
+  ok('the history builder is extractable from the client source',
+    nav !== null && typeof nav.push === 'function' && typeof nav.jump === 'function', String(a) + ',' + String(b))
+  if (nav) {
+    const empty = () => ({ list: [], at: -1 })
+    let h = nav.push(empty(), '甲', 0)
+    ok('visiting a note records it, with the cursor on it',
+      h.list.length === 1 && h.at === 0 && h.list[0].name === '甲' && h.list[0].line === 0, JSON.stringify(h))
+    // A link into another note: the note itself is recorded by the name-change effect, the LINE the
+    // reader left from by the jump.
+    h = nav.jump(h, '乙', 5, 100)
+    ok('a jump away records the spot the reader LEFT from on the entry behind it',
+      h.list[0].line === 100 && h.list.length === 1 && h.at === 0, JSON.stringify(h))
+    h = nav.push(h, '乙', 0)
+    ok('and the note jumped to becomes the new entry',
+      h.list.length === 2 && h.at === 1 && h.list[1].name === '乙', JSON.stringify(h))
+    // The reported bug: an anchor jump inside the note being read.
+    let s = nav.push(empty(), '丙', 0)
+    s = nav.jump(s, '丙', 211, 100)
+    ok('an anchor jump INSIDE the note being read gets a history entry of its own',
+      s.list.length === 2 && s.at === 1 && s.list[0].name === '丙' && s.list[0].line === 100,
+      JSON.stringify(s))
+    ok('the entry behind it holds the line the reader was on (100), which is what 后退 returns to',
+      s.list[0].line === 100, JSON.stringify(s.list[0]))
+    ok('and the new entry holds the line the jump is heading to, so 前进 can come back to it',
+      s.list[1].line === 211, JSON.stringify(s.list[1]))
+    s = nav.jump(s, '丙', 250, 300)
+    ok('a second in-note jump records where it left from (300), not the first jump\'s destination',
+      s.list.length === 3 && s.at === 2 && s.list[1].line === 300 && s.list[2].line === 250,
+      JSON.stringify(s.list))
+    // 后退 walks 250 → 300 → 100 inside one note; 前进 walks back. Nothing here is a note change.
+    const walk = [{ at: 1, line: 300 }, { at: 0, line: 100 }]
+    ok('walking back over those entries lands on the recorded lines',
+      walk.every((w) => s.list[w.at].line === w.line), JSON.stringify(s.list.map((e) => e.line)))
+    ok('a jump before any visit is ignored instead of inventing an entry',
+      nav.jump(empty(), '丁', 8, 9).list.length === 0, 'no visit yet')
+    ok('coming back to the entry the cursor already points at adds no duplicate',
+      (() => { const base = { list: s.list, at: 0 }; return nav.push(base, '丙', 0) === base })(),
+      'same name')
+    let many = nav.push(empty(), '戊', 0)
+    for (let i = 0; i < 60; i++) many = nav.jump(many, '戊', i + 1, i)
+    ok('the history is capped at 50 entries and the cursor follows the newest',
+      many.list.length === 50 && many.at === 49 && many.list[49].line === 60,
+      JSON.stringify({ n: many.list.length, at: many.at, last: many.list[49] }))
+    // A corrupt line never reaches the restore path: it is normalised to 0 (= "nothing recorded",
+    // which falls back to the live reading position) instead of NaN, which would blank the view.
+    ok('a missing or junk line becomes 0 rather than NaN',
+      nav.jump(empty(), 'x', undefined, undefined).list.length === 0 &&
+      nav.push(empty(), '己', 'nonsense').list[0].line === 0, 'undefined / string')
+  }
+}
+
+console.log('the history is wired into the real paths, not just written')
+// The pure tests above prove the RULES. These tripwires prove the card actually calls them on the
+// three paths that matter — the reported bug was exactly a missing call, not broken arithmetic.
+{
+  const src = fsSync.readFileSync(new URL('./dynamic-client.js', import.meta.url), 'utf8')
+  const flat = src.replace(/\s+/g, ' ')
+  ok('the jump the host reports feeds the history with the line the reader is standing on',
+    /navRecordJump\(navRef\.current, incoming, r\.view\.line, topVisibleLine\(\)/.test(flat), 'applyState jump branch')
+  ok('a jump that lands in the note already open goes through the geometry counter (nothing else would move it)',
+    /navTargetRef\.current = null if \(entry\.line >= 1\) bump\(\) return/.test(flat), 'navGo')
+  ok('a recorded line outranks the host view when a note is entered by 后退/前进',
+    /const recorded = navPendRef\.current === incoming && pendingViewRef\.current !== null/.test(flat), 'applyState restore')
+  ok('and it is marked for exactly the note 后退/前进 is heading to',
+    /navPendRef\.current = entry\.line >= 1 \? entry\.name : null/.test(flat), 'navGo')
+  ok('the menu names the recorded line, so an entry inside this note does not read as a no-op',
+    /e\.name === noteName && e\.line >= 1 \? '（第 ' \+ e\.line \+ ' 行）'/.test(flat), 'navLabel')
+}
+
 console.log('the folder picker')
 // The native picker DEREFERENCES its signal (`signal.aborted`), so calling pick(undefined) throws
 // "Cannot read properties of undefined (reading 'aborted')" from inside it, and the button looks
