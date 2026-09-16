@@ -532,7 +532,7 @@ console.log('settings: the edit gesture is a choice (单击 or 双击), default 
 {
   const src = fs.readFileSync(path.join(lib, 'client.js'), 'utf8')
   ok('the single-click edit is gated on the preference, and the default is OFF',
-    src.indexOf('if (clickToEditRef.current) startInlineEdit(pointToPos(e.clientX, e.clientY))') > 0 &&
+    src.indexOf('if (!mod && clickToEditRef.current) startInlineEdit(pointToPos(e.clientX, e.clientY))') > 0 &&
     src.indexOf("readMarksPref().clickToEdit === true") > 0,
     'gate + default present')
   ok('double click still edits regardless of the switch (it sits before any gate)',
@@ -630,10 +630,11 @@ console.log('tables: the header row is a row, and cells edit in place')
   ok('the cell input is visible (a transparent one hid every typed character)',
     src.indexOf('.dn-cell-in{') > 0 && src.indexOf('.dn-cell-edit .dn-cell-mirror{visibility:hidden;}') > 0 &&
     src.indexOf('color:inherit;caret-color:') > 0, 'visible input + hidden mirror')
-  ok('a cell edits on ONE click, whatever the text gesture switch says',
-    src.indexOf('if (startCellEdit(e.target, { x: e.clientX, y: e.clientY })) return') > 0 &&
-    src.indexOf('if (clickToEditRef.current) startInlineEdit') > 0,
-    'cell first, then the gated block gesture')
+  ok('a cell follows the SAME click/double-click switch as every other block',
+    src.indexOf('if (!mod && clickToEditRef.current && startCellEdit(hitAt(e.clientX, e.clientY) || e.target') > 0 &&
+    src.indexOf('if (!mod && clickToEditRef.current) startInlineEdit') > 0 &&
+    src.indexOf('if (!(e.ctrlKey || e.metaKey) && startCellEdit(hit, { x: e.clientX, y: e.clientY })) return') > 0,
+    'switch gates the single click; the double click always edits')
   ok('clicking another cell commits the one being edited (it used to drop the buffer)',
     src.indexOf('if (open && (open.line !== line || open.at !== at)) commitCellEdit(0)') > 0, 'handover commit')
   ok('the commit splices into the LIVE text and refuses when the cell moved under it',
@@ -646,6 +647,18 @@ console.log('tables: the header row is a row, and cells edit in place')
     src.indexOf("cellEdit && cellEdit.note === noteName") > 0 &&
     src.indexOf('if (ce && ce.note && ce.note !== noteName) { cellEditRef.current = null; setCellEdit(null) }') > 0,
     'note binding present')
+  // The bug that made a REAL click do nothing while every synthetic test passed: the body takes
+  // pointer capture on pointerdown, which retargets pointerup — and the click derived from it — to the
+  // capturing element, so `e.target` was `.dn-body` and `closest('[data-cell-at]')` found nothing.
+  ok('the clicked cell is found by COORDINATES, not through the event target',
+    src.indexOf('function hitAt(x, y)') > 0 &&
+    src.indexOf('startCellEdit(hitAt(e.clientX, e.clientY) || e.target') > 0 &&
+    src.indexOf('if (!(e.ctrlKey || e.metaKey) && startCellEdit(hit, { x: e.clientX, y: e.clientY })) return') > 0,
+    'coordinate hit-testing used by both click paths')
+  ok('Ctrl/Cmd asks for the table source instead of a cell (structure edits stay reachable)',
+    src.indexOf('const mod = e.ctrlKey || e.metaKey') > 0 &&
+    src.indexOf('if (!(e.ctrlKey || e.metaKey) && startCellEdit(') > 0,
+    'modifier honoured in both paths')
 }
 
 console.log('')

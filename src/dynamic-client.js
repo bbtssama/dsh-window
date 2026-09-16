@@ -4269,6 +4269,25 @@ return {
        * a second click is the start of a double click (which edits the block), and buttons,
        * links and inputs keep their own behaviour.
        */
+      /**
+       * The element under these viewport coordinates.
+       *
+       * NOT `e.target`: the body takes POINTER CAPTURE on pointerdown (so a press cannot be stolen
+       * mid-gesture), and that retargets `pointerup` — and therefore the `click` the browser derives
+       * from it — to the CAPTURING element. Measured: a click on a table cell arrives with
+       * `e.target === .dn-body`, so looking the cell up through the event target found nothing and the
+       * cell editor never opened for a real click (while a synthetic click dispatched at the span
+       * worked, which is exactly how this hid from the tests). Hit-testing by coordinates is immune.
+       */
+      function hitAt(x, y) {
+        try {
+          if (typeof document !== 'undefined' && document.elementFromPoint) {
+            const el = document.elementFromPoint(x, y)
+            if (el) return el
+          }
+        } catch (err) { }
+        return null
+      }
       function onBodyClick(e) {
         if (mode !== 'read') return
         if (e.button !== undefined && e.button !== 0) return
@@ -4289,12 +4308,14 @@ return {
         const m = markAtEvent(e)
         if (!m) {
           setMcard(null)
-          // A table cell is the one block where a single click cannot mean anything else (no links, no
-          // marks once the check above said there is none), so it edits on ONE click whatever the
-          // gesture switch says — that is the Typora behaviour the reader asked for, and the switch
-          // keeps guarding the text blocks a stray click used to open by accident.
-          if (startCellEdit(e.target, { x: e.clientX, y: e.clientY })) return
-          if (clickToEditRef.current) startInlineEdit(pointToPos(e.clientX, e.clientY))
+          // The SAME gesture switch as every other block: with 双击 (the default) a single click on a
+          // cell does nothing and a double click edits it; with 单击 a single click edits it. Ctrl/Cmd
+          // is the "I want the table's SOURCE" modifier (adding or removing a row is a structure edit)
+          // and has to be honoured HERE too — the first click of a double click would otherwise open
+          // the cell editor, whose own double-click handler swallows the rest.
+          const mod = e.ctrlKey || e.metaKey
+          if (!mod && clickToEditRef.current && startCellEdit(hitAt(e.clientX, e.clientY) || e.target, { x: e.clientX, y: e.clientY })) return
+          if (!mod && clickToEditRef.current) startInlineEdit(pointToPos(e.clientX, e.clientY))
           return
         }
         // Tapping the same mark again closes its card (one click does one thing).
@@ -4393,10 +4414,11 @@ return {
         if (tgt && tgt.closest) { const a = tgt.closest('a'); if (a && a.getAttribute('href') && a.getAttribute('href') !== '#') return }
         const pt = pointToPos(e.clientX, e.clientY)
         if (!pt) { enterEdit(null); return }
+        const hit = hitAt(e.clientX, e.clientY) || e.target
         // A table cell edits ITSELF first (a double click must reach it even when the single-click
-        // gesture is off), then the in-place gesture applies — a code block edits its body, without the
-        // fences. A mermaid block or an image keeps the source box it always had.
-        if (startCellEdit(e.target, { x: e.clientX, y: e.clientY })) return
+        // gesture is off) — unless Ctrl/Cmd is held, which asks for the table's SOURCE (adding or
+        // removing a row is a structure edit, and the cell editor deliberately cannot do that).
+        if (!(e.ctrlKey || e.metaKey) && startCellEdit(hit, { x: e.clientX, y: e.clientY })) return
         if (startInlineEdit(pt)) return
         const range = blockRangeAt(pt.line)
         if (!range) { enterEdit(pt); return }
