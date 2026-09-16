@@ -659,6 +659,12 @@ console.log('tables: the header row is a row, and cells edit in place')
     src.indexOf('const mod = e.ctrlKey || e.metaKey') > 0 &&
     src.indexOf('if (!(e.ctrlKey || e.metaKey) && startCellEdit(') > 0,
     'modifier honoured in both paths')
+  // Reported from a real table: with 双击 (the default) a press on ANOTHER cell did nothing — the press
+  // handler waited for a click that never edits in that mode, so the editor stayed open until the reader
+  // clicked outside the whole table.
+  ok('a press on another cell always leaves the editor (commit+close with 双击, hand-over with 单击)',
+    /if \(node && node\.closest && node\.closest\('\[data-cell-at\]'\)\) \{\s*if \(clickToEditRef\.current\) return\s*commitCellEdit\(0\)\s*return\s*\}/.test(src),
+    'another-cell press handled in both modes')
 }
 
 console.log('')
