@@ -1417,8 +1417,8 @@ console.log('the history is wired into the real paths, not just written')
     /navPackStore\(map, Date\.now\(\), NAV_TTL_MS\)/.test(flat), 'writeNavStore')
   ok('the live session\'s stack is stamped each time it is saved, parked ones keep their own clock',
     /store\[live\] = \{ list: navRef\.current\.list, at: navRef\.current\.at, ts: Date\.now\(\) \}/.test(flat), 'saveNavNow')
-  ok('the stacks are persisted from every place that changes one (11 call sites, exactly one definition)',
-    (flat.match(/saveNavNow\(\)/g) || []).length === 12 && (flat.match(/function saveNavNow\(\)/g) || []).length === 1,
+  ok('the stacks are persisted from every place that changes one (12 call sites, exactly one definition)',
+    (flat.match(/saveNavNow\(\)/g) || []).length === 13 && (flat.match(/function saveNavNow\(\)/g) || []).length === 1,
     String((flat.match(/saveNavNow\(\)/g) || []).length) + ' occurrences of saveNavNow()')
   // A stack entry is pushed with line 0 when its note is opened, and it used to get a real line only
   // when the reader LEFT it — so anybody reading a note saw `line: 0` in the stored stack, and a reload
@@ -1449,7 +1449,35 @@ console.log('the history is wired into the real paths, not just written')
     /list\[nav\.at\] = \{ name: nav\.list\[nav\.at\]\.name, line: left >= 1 \? left : \(Math\.round\(Number\(nav\.list\[nav\.at\]\.line\)\) \|\| 0\) \}/.test(flat), 'navRecordJump')
   // The stack lives in the HOST's per-session file, so a reload does not depend on browser storage.
   ok('every save also goes to the host, and the host answers it',
-    /host\.call\('saveNav', \{ sessionId: sidRef\.current, list: navRef\.current\.list, at: navRef\.current\.at \}\)/.test(flat), 'saveNavNow')
+    /host\.call\('saveNav', \{ sessionId: live, list: navRef\.current\.list, at: navRef\.current\.at \}\)/.test(flat), 'saveNavNow')
+  // THE cross-session leak (reported twice, and audited in the stored files): during a session switch the
+  // card already shows session B while the stack is still A's, and the save used to carry B's id with A's
+  // entries — so one session's history was written into another session's file. A list is now persisted
+  // under its OWN session only, and the outgoing session is flushed to itself before the swap.
+  ok('a stack is never persisted under a session it does not belong to',
+    /if \(live !== String\(sidRef\.current \|\| ''\)\) return/.test(flat) &&
+    /if \(live === ''\) return/.test(flat) &&
+    /host\.call\('saveNav', \{ sessionId: navSidRef\.current, list: navRef\.current\.list/.test(flat),
+    'saveNavNow guard + flush-before-swap')
+  // THE root cause of the cross-session bleed: a state answer is applied without asking WHICH session it
+  // describes, so an answer for the session the reader just left replaced this one's note text, marks,
+  // note list and visit stack. The answer carries its own sessionId; it is now checked once, at the top
+  // of applyState, before anything from it is used.
+  ok('a state answer for another session is refused (the poll is in flight while the card moves on)',
+    /const answerSid = String\(r\.sessionId \|\| ''\)/.test(flat) &&
+    /if \(answerSid !== '' && shownSid !== '' && answerSid !== shownSid\) return/.test(flat) &&
+    /String\(r\.sessionId \|\| ''\) === String\(sidRef\.current \|\| ''\)\).test/.test(flat) === false &&
+    /r\.nav !== undefined && navRef\.current\.at < 0 && String\(r\.sessionId \|\| ''\) !== '' && String\(r\.sessionId \|\| ''\) === String\(sidRef\.current \|\| ''\)/.test(flat),
+    'applyState guard + adoption check')
+  // The host half has to protect the MENU from such entries even if a client sends them: it prunes on
+  // the way IN (which is also what repairs a file that already carries them).
+  {
+    const hostFlat = fsSync.readFileSync(new URL('./dynamic-host.js', import.meta.url), 'utf8').replace(/\s+/g, ' ')
+    ok('the host drops entries that name notes this session does not have, when it reads the stack back',
+      /function navLocalOnly\(value, names\)/.test(hostFlat) &&
+      /if \(nav !== null\) nav = navLocalOnly\(nav, names\)/.test(hostFlat),
+      String((hostFlat.match(/navLocalOnly\(/g) || []).length) + ' uses in the host')
+  }
   // THE reported bug: on every page load the card's own stack is empty until the state answer hands the
   // saved one back, and writing that emptiness out erased it — the next answer then carried nav: null,
   // so nothing was ever adopted and the 后退/前进 menu came up empty after every single refresh.
@@ -1468,7 +1496,7 @@ console.log('the history is wired into the real paths, not just written')
   ok('the task box keeps its pointer events to itself (a click never starts a text selection)',
     /onPointerDown: function \(e\) \{ e\.stopPropagation\(\) \}/.test(flat), 'pointerdown')
   ok('and the state answer\'s stack is adopted while ours is still empty',
-    /if \(r\.nav !== undefined && navRef\.current\.at < 0\) \{/.test(flat) &&
+    /if \(r\.nav !== undefined && navRef\.current\.at < 0 && String\(r\.sessionId \|\| ''\) !== '' && String\(r\.sessionId \|\| ''\) === String\(sidRef\.current \|\| ''\)\) \{/.test(flat) &&
     /const fromHost = navFromHost\(r\.nav, Date\.now\(\), NAV_TTL_MS\)/.test(flat), 'applyState')
   ok('a state answer seeds a still-empty history, so a session whose note name repeats is not blank',
     /if \(incoming !== '' && navRef\.current\.at < 0\) navRef\.current = navPushVisit\(navRef\.current, incoming, 0\)/.test(flat),

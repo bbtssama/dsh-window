@@ -1159,6 +1159,30 @@ return {
       }
       return out
     }
+    /**
+     * Drop every stack entry that names a note THIS session does not have.
+     *
+     * The stack is per session, and a note name only means something inside its own note space. A
+     * client that sent one session's list with another session's id (the refs disagree for a moment
+     * during a session switch — that is what made two session files hold stacks made entirely of other
+     * sessions' notes) writes history that can never be opened here. Pruning on the way in AND on the
+     * way out makes that impossible, and it repairs files that already carry such entries.
+     */
+    function navLocalOnly(value, names) {
+      if (!value || !Array.isArray(value.list)) return null
+      const keep = {}
+      for (let i = 0; i < (names || []).length; i++) keep[String(names[i])] = true
+      const kept = []
+      for (let i = 0; i < value.list.length; i++) {
+        const e = value.list[i]
+        if (e && keep[e.name] === true) kept.push(e)
+      }
+      if (kept.length === 0) return null
+      const cur = value.at >= 0 ? value.list[value.at] : null
+      let at = cur ? kept.indexOf(cur) : -1
+      if (at < 0) at = kept.length - 1
+      return { list: kept, at: at, updatedAt: Math.max(0, intOr(value.updatedAt, 0)) }
+    }
     function cleanNav(raw) {
       if (!raw || typeof raw !== 'object') return null
       const list = cleanNavList(raw.list)
@@ -1183,6 +1207,10 @@ return {
       // and erase the saved stack on every refresh; the host refuses to be the weak link here, so the
       // stored stack survives any such write.
       if (list.length === 0) return { ok: true, ignored: true, entries: nav ? nav.list.length : 0, at: nav ? nav.at : -1 }
+      // What the client sent is stored as given — this is the session's OWN file, and the client is the
+      // only writer. Entries that name notes this session does not have (a client bug, or a note that
+      // was renamed) are dropped when the file is READ back (see readSessionState -> navLocalOnly), so
+      // they can never reach the 后退/前进 menu, and the file repairs itself on its next write.
       nav = { list: list, at: Math.min(Math.max(0, intOr(a.at, 0)), list.length - 1), updatedAt: Date.now() }
       if (fs === undefined || !canWrite() || !sessionId) return { ok: true, entries: nav.list.length }
       try { await writeAt(sessionStatePath(), JSON.stringify(sessionStatePayload(), null, 2) + '\n') } catch (err) { fail('写入进退栈', err) }
@@ -1203,6 +1231,10 @@ return {
       nav = cleanNav(parsed && parsed.nav)
       const names = await listNoteDirs()
       sessionNotes = names
+      // A file written before the guard may hold entries from ANOTHER session (the same name is a
+      // different note in a different note space, so those entries can never be opened here): drop them
+      // on the way in, which also repairs the file the next time it is written.
+      if (nav !== null) nav = navLocalOnly(nav, names)
       if (want && names.indexOf(want) >= 0) activeNote = want
       else activeNote = names.length ? names[0] : ''
       pathCache = null
@@ -1277,6 +1309,10 @@ return {
       S.revision += 1
       await writeSessionState()
       await load()
+      // Opening a note is the moment its history should start existing: if it has no repository yet,
+      // queue one now (background slot, idempotent, never awaited here — the card must not wait for
+      // three subprocesses to show a note). An import still creates nothing: it never calls this.
+      kickNoteInit(clean, 'open')
       // The card is showing a different note now: announce both dimensions, so it refreshes the
       // picker and the body without waiting for the next poll.
       emit('notes', { active: activeNote })
@@ -1304,6 +1340,18 @@ return {
       }
     }
     let loading = null
+    /**
+     * Remember what the note FILE holds, so "is there an unsaved edit?" is answerable.
+     *
+     * Every read of note.md goes through this (the store's own load and the card's reload), because a
+     * missed call site is exactly what made the post-init flush write a file that was already correct:
+     * that redundant write bumps the file's tracked version, and the NEXT save then fails with
+     * FS_STALE_VERSION (the durability suite caught it).
+     */
+    function noteOnDisk(text) {
+      if (!activeNote) return
+      try { factsOf(paths().dir).lastWrote = String(text) } catch (err) { }
+    }
     async function load() {
       if (fs === undefined) { S.error = 'fs 服务不可用'; return }
       loadedBase = base
@@ -1336,6 +1384,9 @@ return {
         if (raw === null) { S.text = SEED_TEXT; S.fileExists = false }
         else { S.text = String(raw).replace(/\r\n?/g, '\n'); S.fileExists = true }
         S.savedAt = isoNow()
+        // What the file holds right now: the post-init flush compares against this, so a freshly
+        // loaded note is never mistaken for one with an unsaved edit.
+        noteOnDisk(S.text)
       } catch (err) { fail('读取笔记', err) }
       try {
         const rawState = await readIfExists(p.state, { track: true })
@@ -1611,6 +1662,12 @@ return {
           S.selections = remapped
           S.text = next
           S.revision += 1
+          // Same bookkeeping as flushAfterWrite: what is on disk, and that git has not seen it yet.
+          {
+            const f = factsOf(sessionRoot() + '/' + activeNote)
+            f.lastWrote = next
+            f.dirty = true
+          }
           try { await persistState() } catch (err) { fail('写入选中记录', err) }
           // The file is written; the repository can be created behind us. Awaiting it here was the
           // last place a save waited on git (three subprocesses, once per note) — the card's status
@@ -1618,7 +1675,7 @@ return {
           // The change is not committed yet — the reader must be able to SEE that. In memory only:
           // asking git for a status here would put process launches back on the path this cleared.
           if (activeNote) factsOf(sessionRoot() + '/' + activeNote).dirty = true
-          if (!S.gitReady && activeNote) queueRepoCreation(sessionRoot() + '/' + activeNote)
+          if (!S.gitReady && activeNote) kickNoteInit(activeNote, 'save')
         } else {
           S.selections = remapped
           S.text = next
@@ -2452,11 +2509,57 @@ return {
      * save returns as soon as the file is written and this runs behind it — the status light in the
      * card's note menu reports yellow while it is in flight and green when it lands.
      */
-    function queueRepoCreation(dir) {
+    /**
+     * Make sure a note's repository exists — WITHOUT ever blocking the caller.
+     *
+     * Deferring the repository is what kept a 156-document import from spawning a thousand git
+     * processes, but it also meant a note could be read and edited for a long time with no history at
+     * all. So the two moments that matter now ask for it: opening a note, and persisting a change.
+     * Both only QUEUE the work (one background slot per note, idempotent), and the queue's completion
+     * writes the note's in-memory text once more before committing — the first commit then contains
+     * what the reader actually has on screen, not a snapshot from before their edit.
+     *
+     * `reason` is only used in the diagnostic trace.
+     */
+    function kickNoteInit(name, reason) {
+      if (shell === undefined || fs === undefined) return false
+      const clean = sanitizeNoteName(name)
+      if (!clean) return false
+      const dir = sessionRoot() + '/' + clean
+      const f = factsOf(dir)
+      if (f.state === 'pending') return false
+      if (f.gitHasHead === true && f.gitProbed === true) return false
+      // The known-absence case costs nothing: the facts cache already learned there is no repo.
+      if (f.gitProbed === true && f.gitHasHead === false) { queueRepoCreation(dir, reason); return true }
+      // Unknown: one lstat, off the caller's path — never awaited by the write that asked for it.
+      void (async function () {
+        try {
+          const has = await noteHasRepo(dir)
+          if (has) { f.gitProbed = true; f.gitHasHead = true; return }
+          queueRepoCreation(dir, reason)
+        } catch (err) { }
+      })()
+      return true
+    }
+    /**
+     * Create a note's repository on the git queue, after the caller has already answered.
+     *
+     * A note's own repository is what "one repository per note" means, and creating it costs three
+     * subprocesses. Making the reader wait for those three is the last piece of git lag left, so the
+     * save returns as soon as the file is written and this runs behind it — the status light in the
+     * card's note menu reports yellow while it is in flight and green when it lands.
+     *
+     * When it lands it also stamps the note's OWN `gitInit` flag (the persistent "this note has had its
+     * first commit" marker the write path checks) and, if the note is the one on screen, writes the
+     * current in-memory text out once more and commits that too — all inside the ONE queue slot it
+     * already holds, because taking the slot again from inside it would deadlock.
+     */
+    function queueRepoCreation(dir, reason) {
       if (shell === undefined || dir === '') return
       const f = factsOf(dir)
       if (f.state === 'pending') return
       f.state = 'pending'
+      f.initWhy = String(reason || '')
       gitStatusRev += 1
       // ONE slot for the whole sequence: the three commands share it instead of each queueing behind
       // the slot this task is already holding (which deadlocks).
@@ -2468,12 +2571,51 @@ return {
           const c = await spawnGitIn(dir, '-c user.name="DSH Note" -c user.email="dsh-note@local" commit -q -m "note: init"')
           if (!c.ok) { f.state = 'error'; gitStatusRev += 1; return }
           const hash = (await headHashFromFiles(dir)) || ''
+          // Read the "has uncommitted content" flag BEFORE the bookkeeping below clears it: the flush
+          // further down is what gets an edit made WHILE git was starting into the history.
+          const wasDirty = f.dirty === true
           f.hash = hash
           f.gitProbed = true
           f.gitHasHead = hash !== ''
           f.gitFor = f.textV
           f.state = 'ok'
           f.dirty = false
+          // The note's own flag: written here (only once per note, and only after the first commit
+          // really landed) so the write path can answer "is this note initialized?" without a probe.
+          try {
+            const noteName = dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop()
+            if (noteName) await writeNoteMeta({ gitInit: true, gitInitAt: isoNow() }, noteName)
+          } catch (err) { }
+          // The note may have been written to while the three commands were in flight (a reader typing,
+          // an agent patching): flush what is on screen now and commit it in this same slot, so the
+          // history starts from the real content instead of a pre-edit snapshot.
+          //
+          // Two guards keep this from doing harm: it only runs when the repository is actually dirty,
+          // and only when the in-memory text differs from what was last written — a redundant write
+          // would bump the file's tracked version and make the NEXT save fail with FS_STALE_VERSION
+          // (the durability suite caught exactly that).
+          if (wasDirty && activeNote && sessionRoot() + '/' + activeNote === dir && fs !== undefined && canWrite() && S.text !== f.lastWrote) {
+            try {
+              await writeAt(paths().note, S.text)
+              S.fileExists = true
+              S.savedAt = isoNow()
+              f.lastWrote = S.text
+            } catch (err) { }
+            try {
+              const st2 = await spawnGitIn(dir, 'status --porcelain')
+              if (st2.ok && st2.out !== '') {
+                await spawnGitIn(dir, 'add -A')
+                const c2 = await spawnGitIn(dir, '-c user.name="DSH Note" -c user.email="dsh-note@local" commit -q -m "note(init): 打开笔记后自动补提交"')
+                if (c2.ok) {
+                  const h2 = (await headHashFromFiles(dir)) || ''
+                  if (h2) { f.hash = h2; S.commitHash = h2; S.committedAt = isoNow() }
+                  f.dirty = false
+                  // The card's own git line follows immediately instead of on the next poll.
+                  gitStatusRev += 1
+                }
+              }
+            } catch (err) { }
+          }
           gitStatusRev += 1
         } catch (err) { f.state = 'error'; gitStatusRev += 1 }
       })
@@ -4009,9 +4151,15 @@ return {
           if (next !== S.text) {
             S.selections = remapSelections(S.selections, S.text, next)
             S.text = next
+            // The new basis is recorded IMMEDIATELY, before any await: `persistState()` below yields,
+            // and a queued background task (the repository init) resumes exactly there — it would then
+            // read the reloaded text as an unsaved edit and write the file again, which invalidates the
+            // very version this reload just adopted (the durability suite caught it as
+            // FS_STALE_VERSION on the next save).
+            noteOnDisk(next)
             S.revision += 1
             try { await persistState() } catch (err) { fail('写入选中记录', err) }
-          }
+          } else noteOnDisk(S.text)
         }
         return Object.assign({ ok: true }, stateView())
       } catch (err) { fail('重载笔记', err); return { ok: false, error: S.error } }
@@ -4180,8 +4328,21 @@ return {
     /** 落盘（笔记 + 标记状态），返回是否成功。 */
     async function flushAfterWrite() {
       if (!canWrite()) return true
+      // Persisting a change is the other moment a note's history must exist. This only QUEUES the
+      // repository (background, idempotent) — the write below never waits for it, so the durability
+      // promise ("the bytes are on disk when the call answers") still holds. When the queue lands it
+      // re-writes the in-memory text and commits it, so a note edited before its first commit still
+      // gets that edit into the first commit.
+      kickNoteInit(activeNote, 'write')
       try { await writeAt(paths().note, S.text); S.fileExists = true; S.savedAt = isoNow() }
       catch (err) { fail('写入笔记', err); return false }
+      // What is on disk now, so the post-init flush can tell a real in-flight edit from a redundant
+      // write, and so the repository counts as dirty (there are bytes in the file git has not seen).
+      if (activeNote) {
+        const f = factsOf(sessionRoot() + '/' + activeNote)
+        f.lastWrote = S.text
+        f.dirty = true
+      }
       // The note text changed: one announcement for every write path (patch, write, import,
       // clear, reload), because they all flush through here.
       emit('text', { revision: S.revision })

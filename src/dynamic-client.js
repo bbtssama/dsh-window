@@ -1652,14 +1652,22 @@ return {
         // path, and a reload picks the stack up from the state answer even when browser storage is
         // unavailable. Fire and forget, like the reading position — but the FIRST failure is said out
         // loud: a persistence channel that fails silently is exactly what cost two rounds of guessing.
-        if (String(sidRef.current || '') !== '') {
+        //
+        // The session id sent is the one the LIST belongs to (navSidRef), never the one being shown
+        // (sidRef): during a session switch the refs disagree for a moment — the card already shows
+        // session B while the stack is still A's — and sending B's id with A's entries wrote one
+        // session's history into another session's file (audited: two session files held stacks made
+        // entirely of other sessions' notes). A list is only ever persisted under its own session.
+        if (live === '') return
+        if (live !== String(sidRef.current || '')) return
+        {
           const failed = function (why) {
             if (navWarnRef.current) return
             navWarnRef.current = true
             notify('进退栈没能存到宿主' + (why ? '（' + why + '）' : '') + '：浏览器副本仍在用')
           }
           try {
-            host.call('saveNav', { sessionId: sidRef.current, list: navRef.current.list, at: navRef.current.at }).then(function (res) {
+            host.call('saveNav', { sessionId: live, list: navRef.current.list, at: navRef.current.at }).then(function (res) {
               if (res && res.ok === false) failed(String(res.error || ''))
             }).catch(function (err) { failed((err && err.message) || '') })
           } catch (err) { failed((err && err.message) || '') }
@@ -1842,6 +1850,17 @@ return {
         // Leaving the session is also leaving the entry you are on, so the line being read right now
         // goes onto it (measured live: a plain scroll never touches the stack).
         stampNavLine(topVisibleLine())
+        // …and that stack, which still belongs to the session being LEFT, goes to the host under ITS
+        // OWN id before the swap replaces it. saveNavNow() refuses to persist a list whose session is
+        // not the one on screen (that guard is what stops one session's history landing in another's
+        // file), so without this flush the last entries of the outgoing session would stay in the
+        // browser only.
+        if (String(navSidRef.current || '') !== '' && String(navSidRef.current || '') !== String(sidRef.current || '') &&
+          Array.isArray(navRef.current.list) && navRef.current.list.length > 0) {
+          try {
+            host.call('saveNav', { sessionId: navSidRef.current, list: navRef.current.list, at: navRef.current.at }).catch(function () { })
+          } catch (err) { }
+        }
         // The visit history belongs to the session being left, not to this one: park it and pick up
         // this session's own. The stacks are PERSISTED, so closing the page (or reloading it) does
         // not lose them; a record nobody has touched for a day is CLEARED rather than loaded (see
@@ -2102,6 +2121,17 @@ return {
           if (r && Array.isArray(r.events)) applyEvents(r.events)
           return
         }
+        // A state answer belongs to the session it was ASKED for, and the poll is in flight while the
+        // card can move to another session. Applying such an answer replaced this session's note text,
+        // marks, note list AND visit stack with the other session's — reported as "进退栈跨会话穿透",
+        // and audited in the stored files: a session with NO notes at all held 17 entries naming
+        // another session's notes. `sessionId: ''` means "the store is not bound yet" (the inactive
+        // answer below handles that), so only two DISTINCT non-empty ids are refused.
+        {
+          const answerSid = String(r.sessionId || '')
+          const shownSid = String(sidRef.current || '')
+          if (answerSid !== '' && shownSid !== '' && answerSid !== shownSid) return
+        }
         if (Array.isArray(r.events)) applyEvents(r.events)
         // Custom mark lists ride every state poll, so the tabs and their counts stay in step
         // with whatever the agent (note_mark_lists) or another window did to them.
@@ -2135,8 +2165,10 @@ return {
         const incoming = String(r.active || '')
         // The host keeps this session's visit stack in the session's own file, and it rides every state
         // answer. Adopt it while ours is still empty — a reload, or a return to this session — and ONLY
-        // then: an adopted stack must never overwrite what this page has already recorded.
-        if (r.nav !== undefined && navRef.current.at < 0) {
+        // then: an adopted stack must never overwrite what this page has already recorded. The answer's
+        // own session id is checked too (see the top of applyState): a late answer for the session the
+        // reader just left must never seed this one's 后退/前进.
+        if (r.nav !== undefined && navRef.current.at < 0 && String(r.sessionId || '') !== '' && String(r.sessionId || '') === String(sidRef.current || '')) {
           const fromHost = navFromHost(r.nav, Date.now(), NAV_TTL_MS)
           if (fromHost) {
             navRef.current = fromHost
