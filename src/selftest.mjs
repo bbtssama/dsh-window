@@ -548,5 +548,56 @@ console.log('settings: the edit gesture is a choice (单击 or 双击), default 
 }
 
 console.log('')
+console.log('an editor belongs to the note it was opened on')
+// The bug this guards against: the active note can change from the HOST (the agent calling note_open)
+// while an in-place editor is open. Nothing used to close it, so the box stayed on screen holding the
+// other note's text — and committing would have spliced that text into the note being displayed.
+{
+  const src = fs.readFileSync(path.join(lib, 'client.js'), 'utf8')
+  ok('the edit payload records which note it was opened on',
+    src.indexOf("note: noteNameRef.current || ''") > 0 && (src.match(/note: noteNameRef\.current \|\| ''/g) || []).length >= 2,
+    'both entry points tag the note')
+  ok('the renderer refuses to draw an editor that belongs to another note',
+    src.indexOf("(!editBlock.note || editBlock.note === noteName)") > 0, 'render guard present')
+  ok('and an effect closes it when the note changes',
+    /React\.useEffect\(function \(\) \{\s*const eb = editBlockRef\.current\s*if \(!eb \|\| !eb\.note \|\| eb\.note === noteName\) return/.test(src),
+    'close-on-note-change effect present')
+  ok('a new edit session starts from the current buffer, not from a reused instance',
+    src.indexOf('}, [props.session])') > 0 && src.indexOf('lastRef.current = String(propsRef.current.value') > 0,
+    'session-keyed refill present')
+  ok('the editor key includes the note and the session (a reopen cannot inherit a cancelled buffer)',
+    src.indexOf("key: key + '_' + (editBlock.note || '') + '_' + (editBlock.openedAt || 0)") > 0,
+    'note + openedAt in the key')
+}
+
+console.log('')
+console.log('local images: the cache is per note, and a failure is retried')
+// Reported as 「本地素材的图片无法加载」 although the host resolved every file: the card cached the
+// answer under the bare href. A relative path means a different file in every note, and a failure was
+// remembered forever, so one miss (a note without an asset root, a host answering mid-restart) left
+// the same path broken for the rest of the page's life.
+{
+  const src = fs.readFileSync(path.join(lib, 'client.js'), 'utf8')
+  ok('the image cache key includes the note',
+    src.indexOf('function assetCacheKey(note, href) { return String(note || \'\') + \'\\u0000\' + String(href || \'\') }') > 0 ||
+    src.indexOf('function assetCacheKey(note, href)') > 0,
+    'assetCacheKey present')
+  ok('the note is threaded from the renderer into every image',
+    src.indexOf("note: noteName, href: tk.href") > 0 && src.indexOf('assetCacheKey(props.note, props.href)') > 0,
+    'note passed + used')
+  ok('a failure is never permanent: it is remembered briefly and then retried',
+    src.indexOf('assetFail[key] = Date.now()') > 0 && src.indexOf('ASSET_RETRY_MS') > 0 &&
+    src.indexOf('Date.now() - failedAt < ASSET_RETRY_MS') > 0,
+    'retry window present')
+  ok('nothing stores a permanent null anymore',
+    src.indexOf('assetCache[key] = null') < 0, 'no null poisoning')
+  ok('a reload and a sync drop the cached bytes',
+    (src.match(/clearAssetCache\(\)/g) || []).length >= 3, (src.match(/clearAssetCache\(\)/g) || []).length + ' call sites')
+  ok('the failure carries the host\'s reason as a tooltip',
+    src.indexOf('setFailReason(String((r && r.error) || ') > 0 && src.indexOf('title: failReason') > 0,
+    'reason surfaced')
+}
+
+console.log('')
 console.log(failed === 0 ? 'ALL CHECKS PASSED' : failed + ' CHECK(S) FAILED')
 process.exitCode = failed === 0 ? 0 : 1
