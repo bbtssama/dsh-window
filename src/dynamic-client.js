@@ -102,6 +102,10 @@ const CSS = [
 '.dn-modal-row{display:flex;align-items:center;gap:6px;font-size:12px;}',
 '.dn-modal-file{font-size:12px;color:#4f7cff;}',
 '.dn-modal-actions{display:flex;align-items:center;gap:8px;}',
+// The settings card's switch row and its explanation.
+'.dn-modal-switch{display:flex;align-items:center;gap:8px;font-size:12.5px;line-height:1.5;cursor:pointer;padding:2px 0;}',
+'.dn-modal-switch input{margin:0;width:15px;height:15px;accent-color:#4f7cff;flex:0 0 auto;cursor:pointer;}',
+'.dn-modal-hint{font-size:11.5px;line-height:1.7;color:#6f7680;white-space:pre-wrap;}',
 '.dn-head{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:44px;padding:0 10px 0 14px;background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.03));border-bottom:1px solid var(--dsw-alias-line-normal,rgba(0,0,0,.12));cursor:grab;touch-action:none;user-select:none;}',
 '.dn-head[data-dragging=true]{cursor:grabbing;}',
 '.dn-head[data-compact=true]{cursor:default;touch-action:auto;}',
@@ -1322,6 +1326,12 @@ return {
       const [notes, setNotes] = React.useState([])
       const [noteName, setNoteName] = React.useState('')
       const [noteModal, setNoteModal] = React.useState(null)
+      // How a block enters in-place editing: 双击 (the default, a stray click must not open an editor)
+      // or 单击 (Typora's gesture). One switch, stored with the other card preferences, read by the
+      // click handlers through a ref because those are plain DOM callbacks, not React handlers.
+      const [settingsOpen, setSettingsOpen] = React.useState(false)
+      const [clickToEdit, setClickToEdit] = React.useState(function () { return readMarksPref().clickToEdit === true })
+      const clickToEditRef = React.useRef(false)
       // Which imported folders are expanded in the note menu: PER SESSION, keyed by asset root.
       // The same root can appear in two sessions, and an expansion made in one has no business
       // deciding what the other one shows. The state is the whole map (session -> open keys), so
@@ -1832,6 +1842,13 @@ return {
       noteNameRef.current = noteName || ''
       notesRef.current = notes
       stRef.current = st
+      clickToEditRef.current = clickToEdit
+      /** Turn the gesture switch on/off and remember it (the settings card is the only writer). */
+      function setClickToEditPref(on) {
+        setClickToEdit(on)
+        writeMarksPref({ clickToEdit: on })
+        notify(on ? '已改为：单击进入编辑' : '已改为：双击进入编辑（默认）')
+      }
       function notify(msg) { setToast(msg) }
       /** Hide the action bar and cancel any pending reveal. */
       function hideBar() {
@@ -4049,10 +4066,11 @@ return {
         if (!m) {
           setMcard(null)
           // Typora-style: a plain click inside the text starts editing that block, right where you
-          // clicked. Nothing that already had a meaning loses it — a click ON a mark still raises the
-          // mark's function card (above), and buttons, links, checkboxes, tables and pictures were
-          // filtered out before this point.
-          startInlineEdit(pointToPos(e.clientX, e.clientY))
+          // clicked — but only when the reader chose 单击 in the settings. The default is 双击, so a
+          // stray click never opens an editor. A click ON a mark still raises the mark's function
+          // card (above), and buttons, links, checkboxes, tables and pictures were filtered out
+          // before this point.
+          if (clickToEditRef.current) startInlineEdit(pointToPos(e.clientX, e.clientY))
           return
         }
         // Tapping the same mark again closes its card (one click does one thing).
@@ -5048,6 +5066,27 @@ return {
         ]),
       ]) : null
       const folderModal = noteModal && noteModal.kind === 'folder'
+      // The settings card. One row on purpose: how a block enters the in-place editor. Closing it
+      // never changes anything — the switch applies the moment it is toggled.
+      const settingsEl = settingsOpen ? h('div', { className: 'dn-modal', key: 'settings', onPointerDown: function (e) { if (e.target === e.currentTarget) setSettingsOpen(false) } }, [
+        h('div', { className: 'dn-modal-box', key: 'box' }, [
+          h('div', { className: 'dn-modal-title', key: 't' }, '设置'),
+          h('label', { className: 'dn-modal-switch', key: 'click' }, [
+            h('input', {
+              type: 'checkbox', key: 'c', checked: clickToEdit,
+              onChange: function (e) { setClickToEditPref(e.target.checked) },
+            }),
+            h('span', { key: 'l' }, '单击正文即进入编辑（关闭时双击进入，默认）'),
+          ]),
+          h('div', { className: 'dn-modal-hint', key: 'h' },
+            '开启：单击正文里的一段（段落 / 标题 / 列表 / 引用 / 代码块）就地进入编辑，光标落在点到的位置。\n' +
+            '关闭（默认）：单击只是单击，双击才进入就地编辑 —— 不易误触。\n' +
+            '两种模式下，单击一段标记文字都仍然是标记功能卡；表格仍是整行源码框；Esc 取消、Ctrl/Cmd+Enter 或点别处提交。'),
+          h('div', { className: 'dn-modal-actions', key: 'a' }, [
+            h('button', { className: 'dn-btn', key: 'x', type: 'button', onClick: function () { setSettingsOpen(false) } }, '关闭'),
+          ]),
+        ]),
+      ]) : null
       const modalEl = noteModal ? h('div', { className: 'dn-modal', key: 'modal' }, [
         h('div', { className: 'dn-modal-box', key: 'box' }, [
           h('div', { className: 'dn-modal-title', key: 't' }, folderModal ? '从文件夹导入（整目录镜像）'
@@ -5634,7 +5673,8 @@ return {
         } else if (menuOpen.kind === 'more') {
           items.push(mi('clr', '清空全部标记', false, clearMarks))
           items.push(mi('rl', '从磁盘重载（AI 改过之后）', false, doReload))
-          items.push(mi('cb', '提交到 git', false, doCommit))
+          items.push(h('div', { className: 'dn-menu-sep', key: 'sm' }))
+          items.push(mi('set', '设置…', false, function () { setMenuOpen(null); setSettingsOpen(true) }))
         } else if (menuOpen.kind === 'view') {
           items.push(mi('note', '本笔记 ' + selList.length, markTab === 'note', function () { setMarkTab('note') }))
           items.push(mi('sess', '本会话 ' + sessionMarks, markTab === 'session', function () { setMarkTab('session'); loadAllMarks() }))
@@ -5743,7 +5783,7 @@ return {
         h('div', { className: 'dn-lay dn-lay-back', key: 'layback' }, h('div', { className: 'dn-lay-in', key: 'inb', ref: layInBackRef, style: layShift }, layBack)),
         h('div', { className: 'dn-lay dn-lay-front', key: 'layfront' }, h('div', { className: 'dn-lay-in', key: 'inf', ref: layInFrontRef, style: layShift }, layFront)),
         ]),
-        panelEl, foot, modalEl, remarkEl, mcardEl, addPanel, menuEl,
+        panelEl, foot, modalEl, settingsEl, remarkEl, mcardEl, addPanel, menuEl,
         toast ? h('div', { className: 'dn-toast', key: 'toast' }, toast) : null,
       ])
     }

@@ -526,5 +526,27 @@ console.log('client render: in-place editing (the mirror layer under the transpa
 }
 
 console.log('')
+console.log('settings: the edit gesture is a choice (单击 or 双击), default 双击')
+// The single-click gesture is opt-in. The default must be the SAFE one — a stray click in the text
+// used to open an editor, which is why the switch exists at all.
+{
+  const src = fs.readFileSync(path.join(lib, 'client.js'), 'utf8')
+  ok('the single-click edit is gated on the preference, and the default is OFF',
+    src.indexOf('if (clickToEditRef.current) startInlineEdit(pointToPos(e.clientX, e.clientY))') > 0 &&
+    src.indexOf("readMarksPref().clickToEdit === true") > 0,
+    'gate + default present')
+  ok('double click still edits regardless of the switch (it sits before any gate)',
+    /function onDoubleClick\(e\) \{[\s\S]*?if \(startInlineEdit\(pt\)\) return/.test(src),
+    'onDoubleClick keeps its own path')
+  ok('the switch lives in the ⋯ menu and is persisted with the card preferences',
+    src.indexOf("items.push(mi('set', '设置…'") > 0 && src.indexOf("writeMarksPref({ clickToEdit: on })") > 0 &&
+    src.indexOf("mi('cb', '提交到 git'") < 0,
+    'menu entry + persistence + no duplicate 提交')
+  ok('the settings card renders the switch from live state, not a stale copy',
+    src.indexOf("checked: clickToEdit,") > 0 && src.indexOf("setClickToEditPref(e.target.checked)") > 0,
+    'checkbox bound to state')
+}
+
+console.log('')
 console.log(failed === 0 ? 'ALL CHECKS PASSED' : failed + ' CHECK(S) FAILED')
 process.exitCode = failed === 0 ? 0 : 1
