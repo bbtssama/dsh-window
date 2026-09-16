@@ -560,8 +560,8 @@ console.log('an editor belongs to the note it was opened on')
   ok('the renderer refuses to draw an editor that belongs to another note',
     src.indexOf("(!editBlock.note || editBlock.note === noteName)") > 0, 'render guard present')
   ok('and an effect closes it when the note changes',
-    /React\.useEffect\(function \(\) \{\s*const eb = editBlockRef\.current\s*if \(!eb \|\| !eb\.note \|\| eb\.note === noteName\) return/.test(src),
-    'close-on-note-change effect present')
+    /React\.useEffect\(function \(\) \{\s*const eb = editBlockRef\.current\s*const ce = cellEditRef\.current\s*if \(eb && eb\.note && eb\.note !== noteName\) \{ editBlockRef\.current = null; setEditBlock\(null\) \}/.test(src),
+    'close-on-note-change effect present (block + cell)')
   ok('a new edit session starts from the current buffer, not from a reused instance',
     src.indexOf('}, [props.session])') > 0 && src.indexOf('lastRef.current = String(propsRef.current.value') > 0,
     'session-keyed refill present')
@@ -596,6 +596,56 @@ console.log('local images: the cache is per note, and a failure is retried')
   ok('the failure carries the host\'s reason as a tooltip',
     src.indexOf('setFailReason(String((r && r.error) || ') > 0 && src.indexOf('title: failReason') > 0,
     'reason surfaced')
+}
+
+console.log('')
+console.log('tables: the header row is a row, and cells edit in place')
+{
+  const src = fs.readFileSync(path.join(lib, 'client.js'), 'utf8')
+  let parseBlocks = null
+  const at = src.indexOf('function parseBlocks(text)')
+  let end = -1, depth = 0
+  for (let k = src.indexOf('{', at); k < src.length; k++) {
+    if (src[k] === '{') depth++
+    else if (src[k] === '}') { depth--; if (depth === 0) { end = k + 1; break } }
+  }
+  try { parseBlocks = eval('(' + src.slice(at, end) + ')') } catch (err) { parseBlocks = null }
+  if (typeof parseBlocks === 'function') {
+    const normal = parseBlocks(['| 算法 | 内存状态 |', '| --- | --- |', '| 标记-清除 | 有碎片 |', '| 标记-复制 | 无碎片 |'].join('\n'))
+    const t1 = normal.filter((b) => b.k === 'table')[0]
+    ok('a table keeps its REAL header row (it used to be dropped, and the first data row promoted)',
+      !!t1 && t1.rows.length === 3 && t1.rows[0].head === true && t1.rows[0].line === 1 &&
+      t1.rows[1].head === false && t1.rows[1].line === 3 && t1.rows[2].line === 4,
+      JSON.stringify(t1 ? t1.rows.map((r) => r.line + ':' + r.head) : null))
+    const emptyHead = parseBlocks(['|  |  |', '| --- | --- |', '| 算法 | 内存状态 |', '| 标记-整理 | 规整 |'].join('\n'))
+    const t2 = emptyHead.filter((b) => b.k === 'table')[0]
+    ok('an EMPTY header line is skipped and the first data row keeps the header slot (unchanged behaviour)',
+      !!t2 && t2.rows.length === 2 && t2.rows[0].head === true && t2.rows[0].line === 3 && t2.rows[1].head === false,
+      JSON.stringify(t2 ? t2.rows.map((r) => r.line + ':' + r.head) : null))
+  }
+  ok('every cell carries the source offsets the editor splices back into',
+    src.indexOf("'data-cell-line': String(row.line)") > 0 && src.indexOf("'data-cell-at': String(base)") > 0 &&
+    src.indexOf("'data-cell-len': String(txt.length)") > 0 && src.indexOf("'data-cell-ci': String(ci)") > 0,
+    'cell offsets present')
+  ok('the cell input is visible (a transparent one hid every typed character)',
+    src.indexOf('.dn-cell-in{') > 0 && src.indexOf('.dn-cell-edit .dn-cell-mirror{visibility:hidden;}') > 0 &&
+    src.indexOf('color:inherit;caret-color:') > 0, 'visible input + hidden mirror')
+  ok('a cell edits on ONE click, whatever the text gesture switch says',
+    src.indexOf('if (startCellEdit(e.target, { x: e.clientX, y: e.clientY })) return') > 0 &&
+    src.indexOf('if (clickToEditRef.current) startInlineEdit') > 0,
+    'cell first, then the gated block gesture')
+  ok('clicking another cell commits the one being edited (it used to drop the buffer)',
+    src.indexOf('if (open && (open.line !== line || open.at !== at)) commitCellEdit(0)') > 0, 'handover commit')
+  ok('the commit splices into the LIVE text and refuses when the cell moved under it',
+    src.indexOf('String(textRef.current || st.text).split') > 0 &&
+    src.indexOf("if (src.substr(ce.at, ce.len) !== ce.wasText)") > 0, 'live text + stale guard')
+  ok('Tab / Enter walk the grid, wrapping to the neighbouring row',
+    src.indexOf('function nextCell(ce, value, dir)') > 0 && src.indexOf("rows.findIndex(function (tr) { return Number(tr.getAttribute('data-line')) === ce.line })") > 0,
+    'cross-row navigation')
+  ok('the cell editor is bound to its note and closed when the note changes',
+    src.indexOf("cellEdit && cellEdit.note === noteName") > 0 &&
+    src.indexOf('if (ce && ce.note && ce.note !== noteName) { cellEditRef.current = null; setCellEdit(null) }') > 0,
+    'note binding present')
 }
 
 console.log('')
